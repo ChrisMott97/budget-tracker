@@ -12,3 +12,5 @@ export const pages = [
         key: 'csv',
     }
 ] as const
+
+export type PageKey = typeof pages[number]['key']
