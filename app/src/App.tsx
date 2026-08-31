@@ -1,24 +1,22 @@
 import NavBar from "./components/NavBar.tsx";
 import * as React from "react";
 import {useState} from "react";
-import CategoriesPage from "./pages/CategoriesPage.tsx";
-import TransactionsPage from "./pages/TransactionsPage.tsx";
 import CsvImportPage from "./pages/CsvImportPage.tsx";
 import type {pages} from "./types.ts";
 
 export const pageComponentByKey: Record<typeof pages[number]['key'], () => React.JSX.Element> = {
-    'categories': CategoriesPage,
-    'transactions': TransactionsPage,
     'csv': CsvImportPage
 }
 
 function App() {
-    const [activePage, setActivePage] = useState<typeof pages[number]['key']>('categories');
+    const [activePage, setActivePage] = useState<typeof pages[number]['key']>('csv');
     const ActiveComponent = pageComponentByKey[activePage];
+    // Hide navigation while it's not required yet in the project
+    const showNavigation = false;
 
     return (
         <div className="p-10">
-            <NavBar selected={activePage} onSelect={(page) => setActivePage(page)}/>
+            {showNavigation && <NavBar selected={activePage} onSelect={(page) => setActivePage(page)}/>}
             <ActiveComponent/>
         </div>
     )

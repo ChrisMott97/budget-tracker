@@ -1,14 +1,6 @@
 export const pages = [
     {
-        title: "Categories",
-        key: 'categories',
-    },
-    {
-        title: "Transactions",
-        key: 'transactions',
-    },
-    {
-        title: "CSV",
+        title: "Home",
         key: 'csv',
     }
 ] as const

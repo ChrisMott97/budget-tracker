@@ -11,8 +11,9 @@ export default function CsvImportPage() {
 
     function submit(formData: FormData) {
         const file = formData.get("csvFile") as File;
-        if (!file) {
-            throw new Error("No file selected");
+        if (!file || file.size === 0) {
+            console.error("No file selected or file is empty");
+            return;
         }
 
         const body = new FormData();
@@ -38,30 +39,33 @@ export default function CsvImportPage() {
 
     const rows = transactions.map(transaction => (
         <tr key={transaction.date + transaction.description}>
-            <td>{transaction.date}</td>
-            <td>{transaction.description}</td>
-            <td>£{transaction.amount.toFixed(2)}</td>
+            <td className="p-2">{transaction.date}</td>
+            <td className="p-2">{transaction.description}</td>
+            <td className="p-2 text-right">£{transaction.amount.toFixed(2)}</td>
         </tr>
     ))
 
     return (
-        <>
-            <form action={submit} className="flex flex-col gap-4 items-start">
-                <input type="file" name="csvFile" accept=".csv" />
-                <button type="submit">Import CSV</button>
+        <div className="flex flex-col gap-4 items-center">
+            <h1 className="text-2xl font-bold mb-4">Import Transactions from CSV</h1>
+            <form action={submit} className="flex flex-col gap-4 items-center">
+                <input type="file" name="csvFile" accept=".csv" className="border border-gray-300 rounded p-3" />
+                <button type="submit" className="bg-blue-500 cursor-pointer text-white font-bold py-2 px-4 rounded">
+                    Import CSV
+                </button>
             </form>
-            <table className="table-fixed w-150">
+            <table className="table-fixed w-2/3 mt-4">
                 <thead>
                     <tr className="text-left">
-                        <th>Date</th>
-                        <th>Description</th>
-                        <th>Amount</th>
+                        <th className="p-2 w-1/10">Date</th>
+                        <th className="p-2 w-1/2">Description</th>
+                        <th className="p-2 w-1/5 text-right">Amount</th>
                     </tr>
                 </thead>
                 <tbody>
                     {rows}
                 </tbody>
             </table>
-        </>
+        </div>
     );
 }
