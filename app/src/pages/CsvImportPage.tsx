@@ -1,40 +1,21 @@
-import { useState } from "react";
-
-interface Transaction {
-    date: string;
-    description: string;
-    amount: number;
-}
+import { useCsvImport } from "../hooks/useCsvImport";
 
 export default function CsvImportPage() {
-    const [transactions, setTransactions] = useState<Transaction[]>([]);
+    const { transactions, status, error, run } = useCsvImport();
 
-    function submit(formData: FormData) {
+    async function submit(e: React.SubmitEvent<HTMLFormElement>) {
+        e.preventDefault();
+        const form = e.currentTarget;
+        const formData = new FormData(form);
         const file = formData.get("csvFile") as File;
         if (!file || file.size === 0) {
             console.error("No file selected or file is empty");
+            form.reset();
             return;
         }
 
-        const body = new FormData();
-        body.append("file", file);
-
-        fetch("/api/transactions", {
-            method: "POST",
-            body,
-        })
-            .then((response) => {
-                if (!response.ok) {
-                    throw new Error("Failed to import CSV");
-                }
-                return response.json();
-            })
-            .then((data) => {
-                setTransactions(data);
-            })
-            .catch((error) => {
-                console.error("Error importing CSV:", error);
-            });
+        await run(file);
+        form.reset();
     }
 
     const rows = transactions.map(transaction => (
@@ -48,10 +29,10 @@ export default function CsvImportPage() {
     return (
         <div className="flex flex-col gap-4 items-center">
             <h1 className="text-2xl font-bold mb-4">Import Transactions from CSV</h1>
-            <form action={submit} className="flex flex-col gap-4 items-center">
+            <form onSubmit={submit} className="flex flex-col gap-4 items-center">
                 <input type="file" name="csvFile" accept=".csv" className="border border-gray-300 rounded p-3" />
-                <button type="submit" className="bg-blue-500 cursor-pointer text-white font-bold py-2 px-4 rounded">
-                    Import CSV
+                <button type="submit" disabled={status === "loading"} className="bg-blue-500 cursor-pointer text-white font-bold py-2 px-4 rounded">
+                    {status === "loading" ? "Importing..." : "Import CSV"}
                 </button>
             </form>
             <table className="table-fixed w-2/3 mt-4">
