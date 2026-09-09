@@ -192,6 +192,41 @@ def test_exact_payee_skips_layer_b(fake_client):
     assert len(fake_client.calls) == 1
 
 
+def test_exact_category_is_remapped_to_a_preset(monkeypatch):
+    """A bank category column is mapped set-to-set; a null target leaves the row None."""
+    api._CATEGORY_MAP_CACHE.clear()
+    layer_a = {
+        "fields": {
+            "date": exact("Date"),
+            "amount": exact("Amount"),
+            "payee": exact("Name"),
+            "category": exact("Category"),
+        }
+    }
+    category_map = {
+        "links": [
+            {"source": "Groceries", "target": "Groceries"},
+            {"source": "Transfers", "target": None},
+        ]
+    }
+    client = FakeClient([layer_a, category_map])
+    monkeypatch.setattr(api, "get_client", lambda: client)
+
+    csv_text = (
+        "Date,Name,Amount,Category\n"
+        "2026-08-01,Tesco,-12.50,Groceries\n"
+        "2026-08-02,Alice,-5.00,Transfers\n"
+    )
+
+    body = post_csv(csv_text).json()
+
+    assert len(client.calls) == 2
+    assert [(row["description"], row["category"]) for row in body] == [
+        ("Tesco", "Groceries"),
+        ("Alice", None),
+    ]
+
+
 def test_embedded_payee_endpoint_narrows_descriptions_to_the_payee_slot(monkeypatch):
     """The whole point of layer B: an embedded descriptor comes back as the payee."""
     layer_a = {

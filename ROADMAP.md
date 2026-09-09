@@ -130,15 +130,20 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       unchanged. Also fixed: the Vite dev proxy targeted `http://localhost:8000`,
       which Node resolves to IPv6 `::1` first while `fastapi dev` binds IPv4 only,
       so every `make dev` import failed at the proxy; it now targets `127.0.0.1`.
-- [ ] **Categorise by set-to-set mapping.** When `category.purity == "exact"`, do not
-      categorise transactions at all: send the distinct category strings (Monzo 10,
-      Starling 10) and map that set onto the preset list in one call. Transaction rows
-      are never involved. The bank's label is a high-priority hint, not authoritative,
-      so `Transfers` may legitimately map to `Housing`. Cache on
-      `(bank category set, category list version)`; allow a null target and fall back
-      to payee-based categorisation for only those rows. Preset list lives in code for
-      the first iteration and becomes user-defined later, which is why the cache key
-      carries a list version from the start.
+- [x] **Categorise by set-to-set mapping** 2026-09-09. When
+      `category.purity == "exact"`, `csv_to_transactions` collects the distinct bank
+      category strings and `infer_category_map` maps that set onto `CATEGORY_PRESETS`
+      in one call -- one `CategoryLink {source, target}` per label, no transaction row
+      involved. `target` is constrained to the preset enum on the wire *and*
+      re-checked against the set in code, so a hallucinated category degrades to a
+      null target rather than a bad label. `resolve_category_map` caches on
+      `(frozenset(bank categories), CATEGORY_LIST_VERSION)`, so a re-import of the
+      same bank asks the model nothing and the key already carries the list version a
+      user-defined preset list will need. First iteration: a null target (no preset
+      fits, or the model omitted the label) sets `category` to None. The
+      payee-based fallback for those rows is the next item; `CATEGORY_PRESETS` has no
+      "Other" so null stays meaningful. `api/tests/test_category.py` pins the mapping,
+      the code-side validation and the cache; `test_api.py` covers the endpoint path.
 - [ ] Categorise by payee where no bank category exists: distinct payees only, never
       whole rows, and the cache stays warm across users.
 - [ ] Show categories in the table and allow manual override, plus the bank-to-preset

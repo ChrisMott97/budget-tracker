@@ -550,6 +550,123 @@ def apply_slots(
                 setattr(rows[index], attr, row_slots[slot].strip())
 
 
+# Preset spending categories a bank's own labels are mapped onto, set to set. No
+# "Other" on purpose: a label that fits none of these maps to null, which the next
+# milestone routes to payee-based categorisation. `CATEGORY_LIST_VERSION` is bumped
+# whenever the list changes, because `resolve_category_map` caches on
+# (bank category set, this version) -- a user-defined list later reuses that key shape.
+CATEGORY_PRESETS = (
+    "Groceries",
+    "Eating out",
+    "Transport",
+    "Shopping",
+    "Bills",
+    "Entertainment",
+    "Health",
+    "Housing",
+    "Savings",
+    "Income",
+    "Transfers",
+    "Fees & charges",
+)
+CATEGORY_LIST_VERSION = "1"
+
+
+class CategoryLink(BaseModel):
+    """One bank category string and the preset it maps to, or null for no match."""
+
+    source: str = Field(description="A bank category string, copied verbatim.")
+    target: str | None = Field(
+        None,
+        description=(
+            "The preset category this bank label best matches, or null when none of "
+            "them fit. The bank's label is a strong hint, not binding."
+        ),
+    )
+
+
+class CategoryMap(BaseModel):
+    """The model's answer: one link per distinct bank category, in any order."""
+
+    links: list[CategoryLink] = Field(default_factory=list)
+
+
+def category_map_schema() -> dict[str, Any]:
+    """`CategoryMap`'s schema, every property required and `target` a preset enum.
+
+    Constraining `target` on the wire is a guard in front of the code-side check in
+    `infer_category_map`: the model picks from the closed preset list rather than
+    free-typing a category it could get subtly wrong. The null branch is kept so
+    "no preset fits" stays expressible.
+    """
+    schema = _required_everywhere(CategoryMap.model_json_schema())
+    schema["$defs"]["CategoryLink"]["properties"]["target"]["anyOf"] = [
+        {"type": "string", "enum": list(CATEGORY_PRESETS)},
+        {"type": "null"},
+    ]
+    return schema
+
+
+def infer_category_map(
+    bank_categories: list[str], client: genai.Client
+) -> dict[str, str | None]:
+    """Map a bank's own category labels onto `CATEGORY_PRESETS`, set to set.
+
+    One call for the whole distinct set (Monzo and Starling each ship ~10), never
+    per transaction: the model sees only the label strings and the presets, so a
+    wrong answer is a mislabelled bucket, not a corrupted row. A target outside the
+    preset list is dropped to null here as well as constrained on the wire.
+    """
+    prompt = (
+        "You are given a bank's own spending-category labels and a fixed list of "
+        "preset categories. Map each bank label to the preset it best matches, as "
+        'JSON. The bank\'s label is a strong hint but not binding: "Transfers" may '
+        'still belong under "Housing". Use null when no preset fits. Never use a '
+        "category outside the preset list.\n\n"
+        f"Preset categories: {', '.join(CATEGORY_PRESETS)}\n\n"
+        f"Bank labels: {json.dumps(sorted(bank_categories))}\n"
+    )
+    interaction = client.interactions.create(
+        model="gemini-flash-lite-latest",
+        input=prompt,
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": category_map_schema(),
+        },
+    )
+
+    if not interaction.output_text:
+        raise HTTPException(502, "Model returned no output")
+
+    category_map = CategoryMap.model_validate_json(interaction.output_text)
+    allowed = set(CATEGORY_PRESETS)
+    return {
+        link.source: link.target if link.target in allowed else None
+        for link in category_map.links
+    }
+
+
+# Memoises `infer_category_map` on (which labels, which preset list). Module-level
+# so a re-import of the same bank's statements in a later request skips the call.
+_CATEGORY_MAP_CACHE: dict[tuple[frozenset[str], str], dict[str, str | None]] = {}
+
+
+def resolve_category_map(
+    bank_categories: set[str], client: genai.Client
+) -> dict[str, str | None]:
+    """`infer_category_map`, cached on the category set and the list version.
+
+    The mapping is a property of the label set and the preset list, not of the
+    rows, so an unchanged pair asks the model nothing. `CATEGORY_LIST_VERSION` in
+    the key means a future user-defined preset list invalidates it cleanly.
+    """
+    key = (frozenset(bank_categories), CATEGORY_LIST_VERSION)
+    if key not in _CATEGORY_MAP_CACHE:
+        _CATEGORY_MAP_CACHE[key] = infer_category_map(sorted(bank_categories), client)
+    return _CATEGORY_MAP_CACHE[key]
+
+
 @app.post("/transactions")
 def csv_to_transactions(file: UploadFile) -> list[Transaction]:
     text, _ = decode_csv(file.file.read())
@@ -569,5 +686,17 @@ def csv_to_transactions(file: UploadFile) -> list[Transaction]:
             client,
         )
         apply_slots(rows, descriptions, slot_map)
+
+    # When the bank ships its own category column, map that label set onto the
+    # presets in one call rather than categorising any row. A null target (no
+    # preset fits, or the model omitted the label) leaves `category` None for the
+    # payee-based fallback in the next milestone.
+    if column_mapping.fields.category.purity == "exact":
+        bank_categories = {row.category for row in rows if row.category is not None}
+        if bank_categories:
+            category_map = resolve_category_map(bank_categories, client)
+            for row in rows:
+                if row.category is not None:
+                    row.category = category_map.get(row.category)
 
     return rows
