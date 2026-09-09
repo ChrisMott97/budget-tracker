@@ -6,8 +6,10 @@ import { createQueryWrapper } from "../test/queryClientWrapper.tsx";
 const csvFile = () => new File(["Date,Description,Amount\n"], "bank.csv", { type: "text/csv" });
 
 const rows = [{ date: "2025-03-12", description: "TESCO STORES", amount: -12.5 }];
+const categoryMap = [{ source: "TESCO STORES", target: "Groceries", kind: "payee" }];
 
-const ok = () => new Response(JSON.stringify(rows), { status: 200 });
+const ok = () =>
+    new Response(JSON.stringify({ transactions: rows, category_map: categoryMap }), { status: 200 });
 const serverError = () => new Response("boom", { status: 500 });
 
 // TanStack pushes mutation state to the component through its notify manager,
@@ -32,6 +34,16 @@ describe("useCsvImport", () => {
         expect(result.current.error).toBeUndefined();
     });
 
+    it("exposes the returned category map", async () => {
+        vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ok()));
+        const { result } = renderHook(() => useCsvImport(), { wrapper: createQueryWrapper() });
+
+        await act(() => result.current.run(csvFile()));
+
+        await expectStatus(() => result.current.status, "success");
+        expect(result.current.categoryMap).toEqual(categoryMap);
+    });
+
     it("exposes an error and clears transactions when the API fails", async () => {
         vi.stubGlobal("fetch", vi.fn().mockResolvedValue(serverError()));
         const { result } = renderHook(() => useCsvImport(), { wrapper: createQueryWrapper() });
@@ -44,7 +56,8 @@ describe("useCsvImport", () => {
     });
 
     it("posts the file as multipart form data to the transactions endpoint", async () => {
-        const fetchMock = vi.fn().mockResolvedValue(new Response("[]", { status: 200 }));
+        const emptyResult = JSON.stringify({ transactions: [], category_map: [] });
+        const fetchMock = vi.fn().mockResolvedValue(new Response(emptyResult, { status: 200 }));
         vi.stubGlobal("fetch", fetchMock);
         const { result } = renderHook(() => useCsvImport(), { wrapper: createQueryWrapper() });
 

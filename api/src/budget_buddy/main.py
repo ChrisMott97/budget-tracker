@@ -37,6 +37,11 @@ class Transaction(BaseModel):
     reference: str | None = None
     txn_type: str | None = None
     currency: str | None = None
+    # The bank category label or payee string that produced `category`, so the
+    # frontend can regroup rows under an edited mapping entry without a re-upload.
+    # For an embedded-payee row the description is already the payee (no new raw
+    # data); for a bank-category row this is the bank's own label.
+    category_source: str | None = None
 
 
 # The file's header row is measured, not inferred, so which of the two addressing
@@ -760,8 +765,29 @@ def resolve_payee_categories(
     return {p: _PAYEE_CATEGORY_CACHE[(p, version)] for p in payees}
 
 
+class CategoryMapEntry(BaseModel):
+    """One source label and the preset it maps to, with its provenance.
+
+    `kind` distinguishes a bank category column mapped set-to-set (``"bank"``)
+    from the payee fallback (``"payee"``), so the frontend can show and edit both
+    as one table while knowing which rows each entry governs. Kept apart from
+    `CategoryLink` / `PayeeLink`, which are the model's request schema.
+    """
+
+    source: str
+    target: str | None
+    kind: Literal["bank", "payee"]
+
+
+class ParseResult(BaseModel):
+    """The endpoint's response: the rows plus the mapping their categories derive from."""
+
+    transactions: list[Transaction]
+    category_map: list[CategoryMapEntry]
+
+
 @app.post("/transactions")
-def csv_to_transactions(file: UploadFile) -> list[Transaction]:
+def csv_to_transactions(file: UploadFile) -> ParseResult:
     text, _ = decode_csv(file.file.read())
 
     dialect = detect_dialect(text)
@@ -780,17 +806,29 @@ def csv_to_transactions(file: UploadFile) -> list[Transaction]:
         )
         apply_slots(rows, descriptions, slot_map)
 
+    # The mapping objects the rows' categories derive from, returned alongside the
+    # rows so the frontend can inspect and edit them rather than re-deriving.
+    bank_entries: list[CategoryMapEntry] = []
+    payee_entries: list[CategoryMapEntry] = []
+
     # When the bank ships its own category column, map that label set onto the
     # presets in one call rather than categorising any row. A null target (no
     # preset fits, or the model omitted the label) leaves `category` None for the
-    # payee-based fallback in the next milestone.
+    # payee-based fallback below.
     if column_mapping.fields.category.purity == "exact":
         bank_categories = {row.category for row in rows if row.category is not None}
         if bank_categories:
             category_map = resolve_category_map(bank_categories, client)
             for row in rows:
                 if row.category is not None:
+                    row.category_source = row.category
                     row.category = category_map.get(row.category)
+            # One entry per distinct label, including any the model omitted
+            # (target None), so the mapping table stays complete and editable.
+            bank_entries = [
+                CategoryMapEntry(source=s, target=category_map.get(s), kind="bank")
+                for s in sorted(bank_categories)
+            ]
 
     # Rows still uncategorised -- no bank category column, or a bank label that fit
     # no preset -- fall back to their payee. One call for the distinct payee set,
@@ -800,6 +838,11 @@ def csv_to_transactions(file: UploadFile) -> list[Transaction]:
         payee_map = resolve_payee_categories(uncategorised, client)
         for row in rows:
             if row.category is None:
+                row.category_source = row.description
                 row.category = payee_map.get(row.description)
+        payee_entries = [
+            CategoryMapEntry(source=s, target=t, kind="payee")
+            for s, t in sorted(payee_map.items())
+        ]
 
-    return rows
+    return ParseResult(transactions=rows, category_map=[*bank_entries, *payee_entries])

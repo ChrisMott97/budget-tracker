@@ -1,7 +1,7 @@
-import type { Transaction } from "../types";
+import type { ParseResult } from "../types";
 
 
-export async function importCsv(file: File, abort?: AbortSignal): Promise<Transaction[]> {
+export async function importCsv(file: File, abort?: AbortSignal): Promise<ParseResult> {
     const body = new FormData();
     body.append("file", file);
 

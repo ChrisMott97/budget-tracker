@@ -158,9 +158,23 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       mapping, the code-side check and the per-payee cache; `test_api.py` covers
       the no-category and null-fallback endpoint paths. Live model run deferred to
       the milestone-5 eval.
-- [ ] Show categories in the table and allow manual override, plus the bank-to-preset
+- [~] Show categories in the table and allow manual override, plus the bank-to-preset
       mapping as an inspectable, editable table -- the mapping is a stored object, not
-      a per-row model guess.
+      a per-row model guess. Split into three diffs.
+      - [x] **Slice 1 -- API returns the mapping as an object** 2026-09-09.
+        `POST /transactions` returned a bare `list[Transaction]` with categories
+        already resolved, so the mapping the rows derive from was never on the wire.
+        The response is now `ParseResult {transactions, category_map}`, where
+        `category_map` is one `CategoryMapEntry {source, target, kind}` per distinct
+        bank label (`kind="bank"`, every label listed even if the model omitted it,
+        so a null target stays inspectable) and per fallback payee (`kind="payee"`).
+        Each `Transaction` gained `category_source` -- the bank label or payee that
+        set its category -- so a later slice can re-apply an edited entry to the
+        right rows without a re-upload. Frontend is unwrap-only: `useCsvImport`
+        exposes `categoryMap`, no UI yet.
+      - [ ] Slice 2 -- per-row manual category override in the table.
+      - [ ] Slice 3 -- `CategoryMappingTable`: edit an entry's target, re-apply to
+        matching non-overridden rows by `category_source`.
 
 ## 2. Persistence and accounts
 - [ ] Decide database: Postgres on Neon or Supabase (recommended) vs DynamoDB

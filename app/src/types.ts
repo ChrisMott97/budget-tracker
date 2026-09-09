@@ -18,4 +18,22 @@ export interface Transaction {
     reference?: string | null;
     txn_type?: string | null;
     currency?: string | null;
+    // The bank category label or payee string that produced `category`. Lets the
+    // table regroup rows under an edited mapping entry (slices 2-3) without a
+    // re-upload.
+    category_source?: string | null;
+}
+
+// One row of the bank/payee -> preset mapping the API returns alongside the
+// transactions. `kind` is the provenance: a bank category column mapped
+// set-to-set, or the payee fallback.
+export interface CategoryMapEntry {
+    source: string;
+    target: string | null;
+    kind: "bank" | "payee";
+}
+
+export interface ParseResult {
+    transactions: Transaction[];
+    category_map: CategoryMapEntry[];
 }

@@ -81,9 +81,9 @@ def test_transactions_endpoint_returns_parsed_rows(fake_client):
     response = post_csv(csv_text)
 
     assert response.status_code == 200
-    body = response.json()
-    assert len(body) == 6
-    assert body[0] == {
+    transactions = response.json()["transactions"]
+    assert len(transactions) == 6
+    assert transactions[0] == {
         "date": "2025-03-01",
         "description": "TESCO STORES 1234",
         "amount": -1.0,
@@ -92,6 +92,7 @@ def test_transactions_endpoint_returns_parsed_rows(fake_client):
         "reference": None,
         "txn_type": None,
         "currency": None,
+        "category_source": "TESCO STORES 1234",
     }
 
 
@@ -138,7 +139,7 @@ def test_transactions_endpoint_handles_fewer_than_six_shapes(fake_client):
     response = post_csv(csv_text)
 
     assert response.status_code == 200
-    assert len(response.json()) == 1
+    assert len(response.json()["transactions"]) == 1
 
 
 def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
@@ -173,9 +174,9 @@ def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
     response = post_csv(csv_text)
 
     assert response.status_code == 200
-    body = response.json()
-    assert len(body) == 2
-    assert body[0] == {
+    transactions = response.json()["transactions"]
+    assert len(transactions) == 2
+    assert transactions[0] == {
         "date": "2026-07-30",
         "description": "CR BRIGHTFORD LTD SALARY",
         "amount": 3980.44,
@@ -184,6 +185,7 @@ def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
         "reference": None,
         "txn_type": None,
         "currency": None,
+        "category_source": "CR BRIGHTFORD LTD SALARY",
     }
 
 
@@ -235,9 +237,16 @@ def test_exact_category_is_remapped_to_a_preset(monkeypatch):
     body = post_csv(csv_text).json()
 
     assert len(client.calls) == 3
-    assert [(row["description"], row["category"]) for row in body] == [
+    assert [(row["description"], row["category"]) for row in body["transactions"]] == [
         ("Tesco", "Groceries"),
         ("Alice", None),
+    ]
+    # Every distinct bank label appears as a `bank` entry (Transfers mapped to
+    # null but stays inspectable); Alice's row fell through to the payee pass.
+    assert body["category_map"] == [
+        {"source": "Groceries", "target": "Groceries", "kind": "bank"},
+        {"source": "Transfers", "target": None, "kind": "bank"},
+        {"source": "Alice", "target": None, "kind": "payee"},
     ]
 
 
@@ -265,7 +274,7 @@ def test_embedded_payee_endpoint_narrows_descriptions_to_the_payee_slot(monkeypa
     body = post_csv(csv_text).json()
 
     assert len(client.calls) == 3
-    assert [row["description"] for row in body] == [
+    assert [row["description"] for row in body["transactions"]] == [
         "BRIGHTFORD LTD SALARY",
         "VODAFONE LTD",
         "BOKKA CAFE LISBOA",
@@ -286,7 +295,15 @@ def test_payee_categorises_rows_with_no_bank_category(monkeypatch):
     body = post_csv(csv_text).json()
 
     assert len(client.calls) == 2
-    assert [row["category"] for row in body] == ["Groceries", "Groceries"]
+    assert [row["category"] for row in body["transactions"]] == [
+        "Groceries",
+        "Groceries",
+    ]
+    # No bank category column, so the whole map is payee-sourced: one entry for
+    # the single distinct description.
+    assert body["category_map"] == [
+        {"source": "TESCO STORES", "target": "Groceries", "kind": "payee"}
+    ]
 
 
 def test_payee_fallback_fills_a_row_left_null_by_the_bank_mapping(monkeypatch):
@@ -309,4 +326,55 @@ def test_payee_fallback_fills_a_row_left_null_by_the_bank_mapping(monkeypatch):
     body = post_csv(csv_text).json()
 
     assert len(client.calls) == 3
-    assert body[0]["category"] == "Transport"
+    row = body["transactions"][0]
+    assert row["category"] == "Transport"
+    # The payee set the final category, so that is what `category_source` names,
+    # even though the row also passed through the (null) bank mapping first.
+    assert row["category_source"] == "TFL TRAVEL"
+    assert body["category_map"] == [
+        {"source": "Misc", "target": None, "kind": "bank"},
+        {"source": "TFL TRAVEL", "target": "Transport", "kind": "payee"},
+    ]
+
+
+def test_response_is_transactions_plus_category_map(fake_client):
+    """The endpoint returns an object with both keys, not a bare row list."""
+    body = post_csv("Date,Description,Amount\n2025-03-12,TESCO STORES,-12.50\n").json()
+
+    assert set(body) == {"transactions", "category_map"}
+    assert isinstance(body["transactions"], list)
+    assert all(
+        set(entry) == {"source", "target", "kind"} for entry in body["category_map"]
+    )
+
+
+def test_bank_mapped_row_reports_the_bank_label_and_omitted_labels_stay_listed(
+    monkeypatch,
+):
+    """A bank-mapped row's source is its bank label; a label the model drops is still listed."""
+    layer_a = {
+        "fields": {
+            "date": exact("Date"),
+            "amount": exact("Amount"),
+            "payee": exact("Name"),
+            "category": exact("Category"),
+        }
+    }
+    # The model answers for "Groceries" only and omits "Mystery" entirely.
+    category_map = {"links": [{"source": "Groceries", "target": "Groceries"}]}
+    client = FakeClient([layer_a, category_map, {"links": []}])
+    monkeypatch.setattr(api, "get_client", lambda: client)
+
+    csv_text = (
+        "Date,Name,Amount,Category\n"
+        "2026-08-01,Tesco,-12.50,Groceries\n"
+        "2026-08-02,Whatsit,-3.00,Mystery\n"
+    )
+
+    body = post_csv(csv_text).json()
+
+    tesco = body["transactions"][0]
+    assert (tesco["category"], tesco["category_source"]) == ("Groceries", "Groceries")
+    # "Mystery" was omitted by the model, so its row fell through to the payee
+    # pass -- but the label is still an inspectable `bank` entry with no target.
+    assert {"source": "Mystery", "target": None, "kind": "bank"} in body["category_map"]

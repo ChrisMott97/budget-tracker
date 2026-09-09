@@ -1,11 +1,11 @@
 import { useMutation } from "@tanstack/react-query";
-import type { Transaction } from "../types";
+import type { ParseResult } from "../types";
 import { importCsv } from "../api/transactions";
 
 export type ImportStatus = "idle" | "loading" | "error" | "success";
 
 export function useCsvImport() {
-    const mutation = useMutation<Transaction[], Error, File>({
+    const mutation = useMutation<ParseResult, Error, File>({
         mutationFn: (file) => importCsv(file),
     });
 
@@ -24,7 +24,11 @@ export function useCsvImport() {
     const status: ImportStatus = mutation.status === "pending" ? "loading" : mutation.status;
 
     return {
-        transactions: mutation.data ?? [],
+        transactions: mutation.data?.transactions ?? [],
+        // The bank/payee -> preset mapping the rows' categories derive from.
+        // Exposed here for slices 2-3 (per-row override, editable mapping table);
+        // no consumer yet.
+        categoryMap: mutation.data?.category_map ?? [],
         status,
         error: mutation.error?.message,
         run,
