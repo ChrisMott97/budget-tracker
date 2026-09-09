@@ -11,6 +11,9 @@ from pathlib import Path
 from budget_buddy.profile import read_raw_frame
 from budget_buddy.shapes import (
     bucket_by_refined_shape,
+    mask_words,
+    non_comma_slot_count,
+    refine_with_slots,
     refined_shape,
     shape,
     slots,
@@ -158,6 +161,54 @@ def test_a_bank_prefix_is_its_own_slot():
 def test_an_ampersand_stays_inside_its_word_run_slot():
     assert _slots("MARKS & SPENCER") == ["MARKS & SPENCER"]
     assert _slots("M&S SIMPLY FOOD") == ["M&S SIMPLY FOOD"]
+
+
+def test_refine_with_slots_pairs_row_indices_with_slot_substrings():
+    descriptions = [
+        "CR BRIGHTFORD LTD SALARY",
+        "DD VODAFONE LTD",
+        "VIS BOKKA CAFE LISBOA",
+    ]
+    buckets = refine_with_slots(descriptions)
+
+    assert list(buckets) == ["PFX W+"]
+    entries = buckets["PFX W+"]
+    assert [index for index, _ in entries] == [0, 1, 2]
+    for _, row_slots in entries:
+        assert len(row_slots) == non_comma_slot_count("PFX W+")
+    assert entries[0][1] == ["CR", "BRIGHTFORD LTD SALARY"]
+
+
+def test_refine_with_slots_agrees_with_bucket_by_refined_shape():
+    """Dropping the slot substrings must reproduce the plain bucketing exactly."""
+    fixtures = [
+        ("natwest.csv", "Description", True),
+        ("hsbc.csv", "1", False),
+        ("amex.csv", "Description", True),
+    ]
+    for name, label, has_header in fixtures:
+        descriptions = fixture_descriptions(name, label, has_header=has_header)
+        plain = bucket_by_refined_shape(descriptions)
+        with_slots = {
+            key: [index for index, _ in rows]
+            for key, rows in refine_with_slots(descriptions).items()
+        }
+        assert with_slots == plain, name
+
+
+def test_mask_words_replaces_words_but_keeps_numbers_dates_and_commas():
+    row = "7712 26AUG26 C , WAITROSE 742 , LONDON GB"
+
+    assert mask_words(row) == "7712 26AUG26 X , X 742 , X X"
+
+
+def test_mask_words_never_leaks_a_word_token():
+    row = "DIRECT DEBIT ACME INSURANCE 987654 REF A1B2C3"
+    masked = mask_words(row)
+
+    for token in ["DIRECT", "DEBIT", "ACME", "INSURANCE", "REF"]:
+        assert token not in masked
+    assert "987654" in masked
 
 
 def fixture_descriptions(

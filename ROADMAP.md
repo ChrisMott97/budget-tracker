@@ -97,12 +97,25 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       out of `main.py` (closing the duplicated tokeniser flagged in `profile.py`);
       pinned in `api/tests/test_shapes.py`. Not wired into the endpoint -- layer B
       consumes it next.
-- [ ] **Layer B -- slot assignment.** For `embedded` columns only, bucket rows by
-      refined shape and have the model map each fact to a *slot index*, never a value:
-      `"N4 DATE W+ , W+ , W+"` becomes `{card_last4: 0, date: 1, payee: 3,
-      location: 4}`. Code applies that to every row in the bucket. Cost is O(distinct
-      patterns) rather than O(rows) -- NatWest is 10 shapes for 36 rows -- and the
-      model cannot invent a merchant when it only emits integers.
+- [x] **Layer B -- slot assignment** 2026-09-09. When `payee.purity == "embedded"`,
+      `csv_to_transactions` calls `infer_slot_map`: `shapes.refine_with_slots` buckets
+      the descriptions by refined shape, and the model maps each embedded fact to a
+      *slot index* per shape, never a value -- one call, O(distinct shapes). The model
+      sees only the shape strings and `shapes.mask_words` sample rows (every word
+      token blanked to `X`, numbers and dates kept as the structural anchors), so it
+      cannot return a merchant, only an integer into one. `non_comma_slot_count`
+      bounds every returned index: an out-of-range one is dropped to null and that
+      bucket keeps its whole descriptor, so a hallucination degrades rather than
+      corrupting a row. A response whose assignment count does not match the shape
+      count is a 502 -- the whole answer is untrustworthy, not just one bucket.
+      `apply_payee_slots` then rewrites each row's `description` to its payee slot;
+      `date` / `reference` / `txn_type` slots are inferred and validated but not yet
+      surfaced (no field on `Transaction` until persistence lands). `refine_with_slots`
+      is `bucket_by_refined_shape` plus the per-row `slots()` cut, sharing the
+      bucket-wide suffix table so an index cannot point at the wrong text; the old
+      function is now a thin wrapper over it. Pinned in `api/tests/test_layer_b.py`
+      and `test_shapes.py`. Live model run against the fixtures still to do (eval,
+      milestone 5).
 - [ ] **Categorise by set-to-set mapping.** When `category.purity == "exact"`, do not
       categorise transactions at all: send the distinct category strings (Monzo 10,
       Starling 10) and map that set onto the preset list in one call. Transaction rows
@@ -136,8 +149,11 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       (decisions log). This narrows the exception rather than closing it: layer A
       still needs some real values, and pretending otherwise would be dishonest in
       the DPIA.
-- [ ] Mask word tokens in layer B slot-inference samples, where the question is purely
-      structural and masking costs nothing. Explicitly not applicable to layer A.
+- [x] Mask word tokens in layer B slot-inference samples 2026-09-09. `shapes.mask_words`
+      blanks every `W`/`AMP`/`X` token to `X` and keeps numbers, dates and commas; the
+      sample rows `infer_slot_map` sends carry the structural anchors and no payee,
+      location or name. Explicitly not applicable to layer A. Landed with the layer-B
+      slot-assignment item in milestone 1.
 - [ ] Decide the production model provider: Gemini developer API vs Vertex AI (DPA, London region) vs Bedrock (same AWS account and region as the deploy). Recommendation: Bedrock for production, Gemini for local development.
 - [ ] Write `docs/data-protection.md`: data inventory, data flows, processors, retention, lawful basis, user rights. Lightweight DPIA format.
 - [ ] Explicit opt-in screen before the first upload, naming the processor and what is sent.
@@ -175,6 +191,20 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] Get five real users and record what changed as a result
 
 ## Decisions log
+- 2026-09-09: Layer B sends the model word-masked sample rows alongside the refined
+  shape strings, not the bare shapes and not real values. Bare shapes are one string
+  per bucket, so an anchor-less bucket like `W+ , W+ , W+` gives the model nothing to
+  tell the payee from a location. Real values would work but reintroduce raw text
+  into layer B, against the split-into-two-layers decision that layer B is a purely
+  structural question -- and masking there "costs nothing" (milestone 3). The masked
+  rows keep the numeric and date anchors and blank every word, so they add position
+  information without reconstructing a transaction.
+- 2026-09-09: A layer-B response with the wrong number of assignments is a 502, but a
+  single out-of-range slot index is not -- it degrades that one bucket back to the
+  whole descriptor. A count mismatch means the response does not line up with the
+  shapes at all and nothing in it can be trusted; a bad index is one localised
+  mistake the `non_comma_slot_count` bound already contains, and failing the whole
+  import over it would be worse than shipping one un-split descriptor.
 - 2026-09-09: Bucket refinement splits the head against a vocabulary and the tail
   against frequency, not one rule for both. "Recurs at a position, therefore
   structural" is the roadmap's proposed heuristic, but it fails at the head: a

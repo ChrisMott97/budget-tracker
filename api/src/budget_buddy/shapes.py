@@ -320,22 +320,59 @@ def slots(
     return [desc[start:end] for _, start, end in _collapse_runs_with_spans(tagged)]
 
 
-def bucket_by_refined_shape(descriptions: list[str]) -> dict[str, list[int]]:
-    """Group row indices by refined shape.
+def non_comma_slot_count(refined: str) -> int:
+    """The number of slots a refined shape string carries.
 
-    Rows are first grouped by `shape()`; every multi-row group is then re-split by
-    `refined_shape()`, so one bare `W+` bucket becomes `PFX W+`, `W+ PFX`, `W+`
-    sub-buckets. Returns indices, not the description strings, so a bucketing call
-    never hands raw text back out. Keys are sorted for a stable result.
+    Commas are structure, not a slot -- `slots()` and `_collapse_runs_with_spans`
+    both count past them -- so a valid slot index for this shape is in
+    `range(non_comma_slot_count(shape))`.
+    """
+    return len([tok for tok in refined.split() if tok != ","])
+
+
+def mask_words(desc: str) -> str:
+    """`desc` with every word token replaced by `"X"`, other tokens kept literal.
+
+    Numbers, dates, the bank-prefix glyphs, commas and the original spacing all
+    survive; only `W`/`AMP`/`X` tokens (a payee, a location, a person's name) are
+    blanked. Layer B's question is structural, so a masked sample row carries the
+    numeric and date anchors the model needs while reconstructing no transaction.
+    """
+    out = []
+    for kind, text, _, _ in tokenise(desc):
+        if kind == "word" and classify(text) in {"W", "AMP", "X"}:
+            out.append("X")
+        else:
+            out.append(text)
+    return "".join(out)
+
+
+def refine_with_slots(
+    descriptions: list[str],
+) -> dict[str, list[tuple[int, list[str]]]]:
+    """Group rows by refined shape, each paired with its slot substrings.
+
+    Like `bucket_by_refined_shape`, but every row index is returned alongside the
+    output of `slots()` for that row, computed with the *same* bucket-wide
+    `suffix_token_frequencies` and `allow_frequency` the shape key was built from.
+    Recomputing per row would tag a bucket-wide trailing token as `W` rather than
+    `PFX` and shift every index after it.
+
+    Returns real substrings, so this is a server-side step only -- the shape-string
+    keys are safe to send, the slot values are not. Keys are sorted for stability.
     """
     raw_groups: dict[str, list[int]] = {}
     for index, desc in enumerate(descriptions):
         raw_groups.setdefault(shape(desc), []).append(index)
 
-    refined: dict[str, list[int]] = {}
+    refined: dict[str, list[tuple[int, list[str]]]] = {}
     for members in raw_groups.values():
         if len(members) == 1:
-            refined.setdefault(shape(descriptions[members[0]]), []).append(members[0])
+            index = members[0]
+            desc = descriptions[index]
+            freqs = suffix_token_frequencies([desc])
+            row_slots = slots(desc, freqs, 1, allow_frequency=False)
+            refined.setdefault(shape(desc), []).append((index, row_slots))
             continue
         group = [descriptions[i] for i in members]
         suffix_freqs = suffix_token_frequencies(group)
@@ -347,6 +384,26 @@ def bucket_by_refined_shape(descriptions: list[str]) -> dict[str, list[int]]:
                 len(members),
                 allow_frequency=allow_frequency,
             )
-            refined.setdefault(key, []).append(index)
+            row_slots = slots(
+                descriptions[index],
+                suffix_freqs,
+                len(members),
+                allow_frequency=allow_frequency,
+            )
+            refined.setdefault(key, []).append((index, row_slots))
 
     return {key: refined[key] for key in sorted(refined)}
+
+
+def bucket_by_refined_shape(descriptions: list[str]) -> dict[str, list[int]]:
+    """Group row indices by refined shape.
+
+    Rows are first grouped by `shape()`; every multi-row group is then re-split by
+    `refined_shape()`, so one bare `W+` bucket becomes `PFX W+`, `W+ PFX`, `W+`
+    sub-buckets. Returns indices, not the description strings, so a bucketing call
+    never hands raw text back out. Keys are sorted for a stable result.
+    """
+    return {
+        key: [index for index, _ in rows]
+        for key, rows in refine_with_slots(descriptions).items()
+    }

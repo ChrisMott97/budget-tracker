@@ -16,6 +16,7 @@ from budget_buddy.profile import (
     read_raw_frame,
     sample_column_values,
 )
+from budget_buddy.shapes import mask_words, non_comma_slot_count, refine_with_slots
 
 app = FastAPI()
 
@@ -155,6 +156,41 @@ class ColumnMapping(InferredMapping, Dialect):
     Inheritance rather than composition keeps the field set flat, so the parser and
     the fixtures address `has_header` and `fields` on one object as they always have.
     """
+
+
+# The facts layer B can lift out of an embedded descriptor column. A subset of the
+# layer-A fact list: an amount or a balance never hides inside a payee descriptor.
+EMBEDDED_FACTS = ("payee", "date", "reference", "txn_type")
+
+
+class SlotAssignment(BaseModel):
+    """Which slot of a refined shape holds each embedded fact, as a 0-based index.
+
+    The model emits only integers here, so it cannot substitute a value it invented
+    for one the file holds: an out-of-range index is caught and dropped, not applied.
+    """
+
+    payee: int | None = Field(
+        None, description="Slot index of the counterparty, or null."
+    )
+    date: int | None = Field(
+        None, description="Slot index of the transaction date, or null."
+    )
+    reference: int | None = Field(
+        None, description="Slot index of a payment reference, or null."
+    )
+    txn_type: int | None = Field(
+        None, description="Slot index of the payment method or scheme, or null."
+    )
+
+
+class SlotMap(BaseModel):
+    """The model's answer for a batch of shapes: one assignment per shape, in order."""
+
+    assignments: list[SlotAssignment] = Field(
+        default_factory=list,
+        description="One SlotAssignment per shape, in the order the shapes were given.",
+    )
 
 
 def decode_csv(raw: bytes) -> tuple[str, str]:
@@ -349,6 +385,126 @@ def parse_transactions(
     return [Transaction.model_validate(row) for row in df.to_dict(orient="records")]
 
 
+def embedded_facts_in(fields: FieldMap, column: str) -> list[str]:
+    """The `EMBEDDED_FACTS` layer A placed, `embedded`, in this one column.
+
+    Used only to tell layer B which facts to look for -- `payee` is always here
+    (an `embedded` payee is what triggers the layer-B call at all), and NatWest's
+    descriptor also carries `date` and `reference`.
+    """
+    return [
+        fact
+        for fact in EMBEDDED_FACTS
+        if (source := getattr(fields, fact)).purity == "embedded"
+        and source.column == column
+    ]
+
+
+def _validated_assignment(assignment: SlotAssignment, shape: str) -> SlotAssignment:
+    """Drop any slot index that falls outside the shape's slot range.
+
+    The model answers with integers, so a hallucination is an out-of-range index,
+    not a fabricated merchant. A bad index degrades that one shape's bucket back to
+    the whole descriptor; it does not fail the request.
+    """
+    limit = non_comma_slot_count(shape)
+    kept = {
+        fact: index
+        for fact, index in assignment.model_dump().items()
+        if index is not None and 0 <= index < limit
+    }
+    return SlotAssignment(**kept)
+
+
+def infer_slot_map(
+    descriptions: list[str], embedded_facts: list[str], client: genai.Client
+) -> dict[str, SlotAssignment]:
+    """Ask the model which slot index holds each embedded fact, per refined shape.
+
+    Cost is O(distinct shapes): NatWest is ~10 shapes for 36 rows. The model sees
+    only the shape strings and word-masked sample rows, never a raw description, so
+    it cannot return a payee -- only an index into one.
+    """
+    buckets = refine_with_slots(descriptions)
+    shapes = list(buckets)
+    if not shapes:
+        return {}
+
+    payload = [
+        {
+            "shape": shape,
+            "samples": [
+                mask_words(descriptions[index]) for index, _ in buckets[shape][:3]
+            ],
+        }
+        for shape in shapes
+    ]
+    prompt = (
+        "You are given the structural shapes of a composite bank-descriptor "
+        "column, with word-masked sample rows. Do not return any transaction "
+        "text; answer only with slot indices, as JSON.\n\n"
+        "A shape is a sequence of slot tokens:\n"
+        "- W+   a run of one or more words (a payee, a location, a name)\n"
+        "- N4   a 4-digit number (N2, N6, ... for other widths; N+ if longer)\n"
+        "- DATE a date\n"
+        "- PFX  a structural bank prefix or a recurring trailing code\n"
+        "- X    punctuation or junk\n"
+        "- ,    a comma: a separator, NOT a slot\n\n"
+        "Number the slots left to right from 0, skipping commas, so "
+        '"N4 DATE W+ , W+ , W+" has slots 0=N4, 1=DATE, 2=W+, 3=W+, 4=W+.\n\n'
+        f"For each shape, give the slot index of each of these facts: "
+        f"{', '.join(embedded_facts)}. Use null when the shape does not carry the "
+        "fact. The payee is the merchant, person or organisation; it is usually "
+        "the longest word run. A short word run beside it is often a location and "
+        "is not the payee. In the masked samples every word is X, but the numbers "
+        "and dates are real and mark where the structural slots sit.\n\n"
+        "Return one assignment per shape, in the order given. The shapes are:\n\n"
+    )
+    interaction = client.interactions.create(
+        model="gemini-flash-lite-latest",
+        input=prompt + json.dumps(payload, indent=2),
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": _required_everywhere(SlotMap.model_json_schema()),
+        },
+    )
+
+    if not interaction.output_text:
+        raise HTTPException(502, "Model returned no output")
+
+    slot_map = SlotMap.model_validate_json(interaction.output_text)
+    if len(slot_map.assignments) != len(shapes):
+        raise HTTPException(
+            502,
+            f"Model returned {len(slot_map.assignments)} slot assignments for "
+            f"{len(shapes)} shapes",
+        )
+    return {
+        shape: _validated_assignment(assignment, shape)
+        for shape, assignment in zip(shapes, slot_map.assignments)
+    }
+
+
+def apply_payee_slots(
+    rows: list[Transaction],
+    descriptions: list[str],
+    slot_map: dict[str, SlotAssignment],
+) -> None:
+    """Narrow each row's description to its payee slot, in place.
+
+    `descriptions` is the list `slot_map` was inferred from, so re-bucketing it
+    here reproduces the same shapes and slot cuts. A bucket with no assignment or
+    no payee slot keeps the whole descriptor -- the pre-layer-B behaviour.
+    """
+    for shape, members in refine_with_slots(descriptions).items():
+        assignment = slot_map.get(shape)
+        if assignment is None or assignment.payee is None:
+            continue
+        for index, row_slots in members:
+            rows[index].description = row_slots[assignment.payee].strip()
+
+
 @app.post("/transactions")
 def csv_to_transactions(file: UploadFile) -> list[Transaction]:
     text, _ = decode_csv(file.file.read())
@@ -359,6 +515,14 @@ def csv_to_transactions(file: UploadFile) -> list[Transaction]:
 
     rows = parse_transactions(text, column_mapping)
 
-    # Next (ROADMAP milestone 1, layer B): shapes.bucket_by_refined_shape groups
-    # the descriptions, then the model maps each fact to a slot index per bucket.
+    payee = column_mapping.fields.payee
+    if payee.purity == "embedded" and payee.column is not None:
+        descriptions = [row.description for row in rows]
+        slot_map = infer_slot_map(
+            descriptions,
+            embedded_facts_in(column_mapping.fields, payee.column),
+            client,
+        )
+        apply_payee_slots(rows, descriptions, slot_map)
+
     return rows

@@ -26,11 +26,13 @@ def exact(column: str) -> dict:
     return {"column": column, "purity": "exact"}
 
 
+# An `exact` payee keeps these tests to a single model call; the embedded-payee
+# path that triggers layer B has its own tests below with their own canned answers.
 MAPPING = {
     "fields": {
         "date": exact("Date"),
         "amount": exact("Amount"),
-        "payee": {"column": "Description", "purity": "embedded"},
+        "payee": exact("Description"),
     }
 }
 
@@ -138,7 +140,10 @@ def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
                     "amount": exact("2"),
                     "payee": {"column": "1", "purity": "embedded"},
                 },
-            }
+            },
+            # payee is embedded, so layer B runs; a null slot leaves the
+            # descriptor whole, which is what this test asserts on.
+            {"assignments": [{"payee": None}]},
         ]
     )
     monkeypatch.setattr(api, "get_client", lambda: client)
@@ -168,3 +173,41 @@ def test_transactions_endpoint_rejects_a_field_map_missing_a_required_fact(monke
 
     assert response.status_code == 422
     assert "amount" in response.json()["detail"]
+
+
+def test_exact_payee_skips_layer_b(fake_client):
+    """An `exact` payee needs no slot inference, so only layer A is called."""
+    post_csv("Date,Description,Amount\n2025-03-12,TESCO STORES,-12.50\n")
+
+    assert len(fake_client.calls) == 1
+
+
+def test_embedded_payee_endpoint_narrows_descriptions_to_the_payee_slot(monkeypatch):
+    """The whole point of layer B: an embedded descriptor comes back as the payee."""
+    layer_a = {
+        "fields": {
+            "date": exact("Date"),
+            "amount": exact("Amount"),
+            "payee": {"column": "Description", "purity": "embedded"},
+        }
+    }
+    # The three rows share the refined shape `PFX W+` (scheme prefix, then payee),
+    # so layer B answers with one assignment: the payee is slot 1.
+    client = FakeClient([layer_a, {"assignments": [{"payee": 1}]}])
+    monkeypatch.setattr(api, "get_client", lambda: client)
+
+    csv_text = (
+        "Date,Description,Amount\n"
+        "2026-08-01,CR BRIGHTFORD LTD SALARY,3980.44\n"
+        "2026-08-02,DD VODAFONE LTD,-24.50\n"
+        "2026-08-03,VIS BOKKA CAFE LISBOA,-8.10\n"
+    )
+
+    body = post_csv(csv_text).json()
+
+    assert len(client.calls) == 2
+    assert [row["description"] for row in body] == [
+        "BRIGHTFORD LTD SALARY",
+        "VODAFONE LTD",
+        "BOKKA CAFE LISBOA",
+    ]
