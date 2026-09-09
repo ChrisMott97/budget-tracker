@@ -1,8 +1,12 @@
 import TransactionsTable from "../components/TransactionsTable.tsx";
 import { useCsvImport } from "../hooks/useCsvImport";
+import { useCategories } from "../hooks/useCategories";
+import { useCategoryOverrides } from "../hooks/useCategoryOverrides";
 
 export default function CsvImportPage() {
     const { transactions, status, error, run } = useCsvImport();
+    const { categories } = useCategories();
+    const { overrides, setOverride, reset } = useCategoryOverrides();
 
     async function submit(e: React.SubmitEvent<HTMLFormElement>) {
         e.preventDefault();
@@ -16,6 +20,8 @@ export default function CsvImportPage() {
         }
 
         await run(file);
+        // Drop edits from the previous file: overrides are keyed by row index.
+        reset();
         form.reset();
     }
 
@@ -29,7 +35,12 @@ export default function CsvImportPage() {
                 </button>
             </form>
             {error && <p role="alert" className="text-red-600">{error}</p>}
-            <TransactionsTable transactions={transactions} />
+            <TransactionsTable
+                transactions={transactions}
+                categories={categories}
+                overrides={overrides}
+                onOverride={setOverride}
+            />
         </div>
     );
 }

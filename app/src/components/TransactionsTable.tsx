@@ -2,9 +2,9 @@ import type { Transaction } from "../types";
 
 // Facts that only some banks carry. Rendered as a column only when the current
 // result populates it, so a sparse export (Amex: date, description, amount) does
-// not grow empty columns.
+// not grow empty columns. Category is not here: its cell is an always-present
+// override control, so the column shows on every result.
 const OPTIONAL_COLUMNS = [
-    { key: "category", label: "Category" },
     { key: "txn_type", label: "Type" },
     { key: "reference", label: "Reference" },
 ] as const;
@@ -21,7 +21,19 @@ function money(value: number, currency?: string | null): string {
     return currency ? `${currency} ${amount}` : `£${amount}`;
 }
 
-export default function TransactionsTable({ transactions }: { transactions: Transaction[] }) {
+interface TransactionsTableProps {
+    transactions: Transaction[];
+    categories: string[];
+    overrides: Record<number, string>;
+    onOverride: (index: number, value: string) => void;
+}
+
+export default function TransactionsTable({
+    transactions,
+    categories,
+    overrides,
+    onOverride,
+}: TransactionsTableProps) {
     const optionalColumns = OPTIONAL_COLUMNS.filter((column) => hasValue(transactions, column.key));
     const showBalance = hasValue(transactions, "balance");
 
@@ -31,6 +43,7 @@ export default function TransactionsTable({ transactions }: { transactions: Tran
                 <tr className="text-left border-b border-gray-300">
                     <th className="p-2">Date</th>
                     <th className="p-2">Description</th>
+                    <th className="p-2">Category</th>
                     {optionalColumns.map((column) => (
                         <th key={column.key} className="p-2">{column.label}</th>
                     ))}
@@ -43,6 +56,19 @@ export default function TransactionsTable({ transactions }: { transactions: Tran
                     <tr key={`${transaction.date}-${index}`} className="border-t border-gray-200">
                         <td className="p-2 whitespace-nowrap">{transaction.date}</td>
                         <td className="p-2">{transaction.description}</td>
+                        <td className="p-2">
+                            <select
+                                aria-label={`Category for ${transaction.description}`}
+                                className="border border-gray-300 rounded p-1"
+                                value={overrides[index] ?? transaction.category ?? ""}
+                                onChange={(e) => onOverride(index, e.target.value)}
+                            >
+                                <option value="">Uncategorised</option>
+                                {categories.map((category) => (
+                                    <option key={category} value={category}>{category}</option>
+                                ))}
+                            </select>
+                        </td>
                         {optionalColumns.map((column) => (
                             <td key={column.key} className="p-2">{transaction[column.key] ?? ""}</td>
                         ))}

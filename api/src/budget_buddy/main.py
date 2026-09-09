@@ -577,6 +577,17 @@ CATEGORY_PRESETS = (
 CATEGORY_LIST_VERSION = "1"
 
 
+class CategoryPresets(BaseModel):
+    """The preset categories the table's override dropdown offers.
+
+    A wrapper object rather than a bare list so a user-defined list later can add
+    `list_version` (the cache key in `resolve_category_map`) without changing the
+    response shape.
+    """
+
+    categories: list[str]
+
+
 class CategoryLink(BaseModel):
     """One bank category string and the preset it maps to, or null for no match."""
 
@@ -846,3 +857,9 @@ def csv_to_transactions(file: UploadFile) -> ParseResult:
         ]
 
     return ParseResult(transactions=rows, category_map=[*bank_entries, *payee_entries])
+
+
+@app.get("/categories")
+def list_categories() -> CategoryPresets:
+    """The preset category list, so the frontend override dropdown has one source of truth."""
+    return CategoryPresets(categories=list(CATEGORY_PRESETS))

@@ -37,3 +37,8 @@ export interface ParseResult {
     transactions: Transaction[];
     category_map: CategoryMapEntry[];
 }
+
+// The preset category names the override dropdown offers, from GET /categories.
+export interface CategoryPresets {
+    categories: string[];
+}

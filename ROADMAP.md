@@ -172,7 +172,19 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
         set its category -- so a later slice can re-apply an edited entry to the
         right rows without a re-upload. Frontend is unwrap-only: `useCsvImport`
         exposes `categoryMap`, no UI yet.
-      - [ ] Slice 2 -- per-row manual category override in the table.
+      - [x] **Slice 2 -- per-row manual category override in the table** 2026-09-09.
+        Every row's Category cell is now a `<select>` of the presets plus
+        "Uncategorised", pre-set to the resolved category. The preset list has one
+        source of truth: new `GET /categories` (`CategoryPresets {categories}`, a
+        wrapper object so a user-defined list can add `list_version` later), fetched
+        by `useCategories` (`useQuery`). Edits live in `useCategoryOverrides` -- a
+        plain `useState<Record<number,string>>` keyed by row index, lifted out of the
+        table so slice 3 can skip overridden rows; `CsvImportPage` calls its `reset()`
+        after each import since indices do not survive a new file. Category left
+        `OPTIONAL_COLUMNS` and always renders now -- an override needs a visible
+        control on uncategorised rows too. Client-only until persistence (milestone
+        2). `test_api.py` covers the endpoint; `TransactionsTable.test.tsx`,
+        `useCategories.test.ts` and `useCategoryOverrides.test.ts` cover the UI.
       - [ ] Slice 3 -- `CategoryMappingTable`: edit an entry's target, re-apply to
         matching non-overridden rows by `category_source`.
 

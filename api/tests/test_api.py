@@ -378,3 +378,12 @@ def test_bank_mapped_row_reports_the_bank_label_and_omitted_labels_stay_listed(
     # "Mystery" was omitted by the model, so its row fell through to the payee
     # pass -- but the label is still an inspectable `bank` entry with no target.
     assert {"source": "Mystery", "target": None, "kind": "bank"} in body["category_map"]
+
+
+def test_categories_endpoint_returns_the_preset_list():
+    """GET /categories serves the preset list the frontend override dropdown needs."""
+    with TestClient(api.app) as http:
+        res = http.get("/categories")
+
+    assert res.status_code == 200
+    assert res.json() == {"categories": list(api.CATEGORY_PRESETS)}
