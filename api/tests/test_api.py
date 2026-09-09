@@ -90,3 +90,34 @@ def test_transactions_endpoint_handles_fewer_than_six_shapes(fake_client):
 
     assert response.status_code == 200
     assert len(response.json()) == 1
+
+
+def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
+    """A headerless file used to lose its first row silently; all rows must survive."""
+    client = FakeClient(
+        [
+            {
+                "has_header": False,
+                "date_column": "0",
+                "date_format": "%d/%m/%Y",
+                "description_column": "1",
+                "amount_column": "2",
+            }
+        ]
+    )
+    monkeypatch.setattr(api, "get_client", lambda: client)
+    csv_text = (
+        '30/07/2026,"CR BRIGHTFORD LTD SALARY          ",3980.44\n'
+        '30/07/2026,"DD VODAFONE LTD                   ",-24.50\n'
+    )
+
+    response = post_csv(csv_text)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 2
+    assert body[0] == {
+        "date": "2026-07-30",
+        "description": "CR BRIGHTFORD LTD SALARY",
+        "amount": 3980.44,
+    }

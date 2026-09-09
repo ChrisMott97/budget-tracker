@@ -5,6 +5,9 @@ These run with no network and no API key.
 
 import datetime
 
+import pytest
+from fastapi import HTTPException
+
 from budget_buddy.main import ColumnMapping, decode_csv, parse_transactions, shape
 
 
@@ -74,3 +77,66 @@ def test_parse_transactions_honours_skip_rows_and_delimiter():
     assert len(rows) == 1
     assert rows[0].amount == -3.2
     assert rows[0].date == datetime.date(2025, 3, 12)
+
+
+HEADERLESS_CSV = (
+    '30/07/2026,"CR BRIGHTFORD LTD SALARY          ",3980.44\n'
+    '30/07/2026,"DD VODAFONE LTD                   ",-24.50\n'
+    '31/07/2026,"))) PRET A MANGER 0641 LONDON     ",-9.45\n'
+)
+
+
+def headerless_mapping(**overrides) -> ColumnMapping:
+    return ColumnMapping(
+        has_header=False,
+        date_column="0",
+        date_format="%d/%m/%Y",
+        description_column="1",
+        amount_column="2",
+        **overrides,
+    )
+
+
+def test_parse_transactions_reads_a_headerless_csv_by_position():
+    rows = parse_transactions(HEADERLESS_CSV, headerless_mapping())
+
+    assert len(rows) == 3
+    assert rows[0].date == datetime.date(2026, 7, 30)
+    assert rows[0].description == "CR BRIGHTFORD LTD SALARY"
+    assert rows[0].amount == 3980.44
+
+
+def test_parse_transactions_keeps_the_first_row_when_there_is_no_header():
+    """The silent data-loss regression: a name-based mapping eats row one as a header."""
+    promoted = parse_transactions(
+        HEADERLESS_CSV,
+        ColumnMapping(
+            date_column="30/07/2026",
+            date_format="%d/%m/%Y",
+            description_column="CR BRIGHTFORD LTD SALARY          ",
+            amount_column="3980.44",
+        ),
+    )
+    assert len(promoted) == 2
+
+    assert len(parse_transactions(HEADERLESS_CSV, headerless_mapping())) == 3
+
+
+def test_parse_transactions_rejects_named_columns_on_a_headerless_csv():
+    mapping = headerless_mapping()
+    mapping.date_column = "Date"
+
+    with pytest.raises(HTTPException) as raised:
+        parse_transactions(HEADERLESS_CSV, mapping)
+
+    assert raised.value.status_code == 422
+
+
+def test_parse_transactions_strips_padded_descriptions():
+    rows = parse_transactions(HEADERLESS_CSV, headerless_mapping())
+
+    assert [row.description for row in rows] == [
+        "CR BRIGHTFORD LTD SALARY",
+        "DD VODAFONE LTD",
+        "))) PRET A MANGER 0641 LONDON",
+    ]

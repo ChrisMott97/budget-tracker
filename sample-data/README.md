@@ -22,17 +22,26 @@ Description structure in `natwest.csv`, for reference:
 - `BAC` — `<PAYER> , <REFERENCE> , FP <DD/MM/YY HHMM> , <long ref>`
 - `D/D`, `S/O`, `CHG` — a plain unquoted merchant string
 
-## Known gap: `hsbc.csv`
+## Expected mappings
 
-`ColumnMapping` addresses columns by name, so it cannot describe a headerless
-file. Worse, the failure is silent rather than loud: `pd.read_csv` promotes the
-first data row to a header, so `hsbc.csv` parses as **24 rows instead of 25**
-and the oldest transaction disappears without an error.
+Every file here has a known-good `ColumnMapping` in `api/tests/test_fixtures.py`,
+asserted against its row count and its first and last transaction. Those tests
+run in CI and hit no network: they pin the parser, not the model.
 
-Closing this needs a `has_header` flag on `ColumnMapping` (falling back to
-positional indices when false) and a test asserting all 25 rows survive. Until
-then `hsbc.csv` is a known-failing fixture, kept because it is the case most
-likely to lose a real user's data quietly.
+## Headerless files: `hsbc.csv`
+
+Closed 2026-09-09. `ColumnMapping` carries a `has_header` flag; when it is false
+the `*_column` fields hold 0-based column indices as strings (`"0"`) and
+`parse_transactions` reads with `header=None`. Previously `pd.read_csv` promoted
+the first data row to a header and `hsbc.csv` parsed as 24 rows instead of 25,
+losing the oldest transaction with no error. It now parses as all **25 rows**.
+
+It stays the positional-inference fixture: it is the only file here where column
+identity is not recoverable from a header, so it is where a wrong inference is
+most likely to lose a real user's data quietly.
+
+Still open: nothing checks that the *model* sets `has_header` correctly for it.
+That needs the inference eval in ROADMAP milestone 5.
 
 ## Regenerating or extending
 

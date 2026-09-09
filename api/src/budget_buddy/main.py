@@ -23,13 +23,26 @@ class Transaction(BaseModel):
     amount: float
 
 
+COLUMN_HINT = (
+    "Column name when has_header is true, otherwise the 0-based column index "
+    'as a string, e.g. "0".'
+)
+
+
 class ColumnMapping(BaseModel):
     skip_rows: int = Field(
         0, description="Number of rows to skip at the start of the CSV file."
     )
     delimiter: str = Field(",", description="Delimiter used in the CSV file.")
+    has_header: bool = Field(
+        True,
+        description=(
+            "True if the first row after skip_rows contains column names rather "
+            "than transaction data."
+        ),
+    )
     date_column: str = Field(
-        "date", description="Name of the column containing transaction dates."
+        "date", description=f"Column containing transaction dates. {COLUMN_HINT}"
     )
     date_format: str = Field(
         "%Y-%m-%d",
@@ -37,10 +50,10 @@ class ColumnMapping(BaseModel):
     )
     description_column: str = Field(
         "description",
-        description="Name of the column containing transaction descriptions.",
+        description=f"Column containing transaction descriptions. {COLUMN_HINT}",
     )
     amount_column: str = Field(
-        "amount", description="Name of the column containing transaction amounts."
+        "amount", description=f"Column containing transaction amounts. {COLUMN_HINT}"
     )
     amount_separator: Literal[".", ","] = Field(
         ".", description="Character used as the decimal separator in the amount column."
@@ -78,31 +91,47 @@ def infer_column_mapping(csv_text: str, client: genai.Client) -> ColumnMapping:
     return ColumnMapping.model_validate_json(interaction.output_text)
 
 
+def column_label(column: str, has_header: bool) -> str | int:
+    """Resolve a mapping value to the label pandas will give that column.
+
+    pandas labels columns by name when the file has a header row and by 0-based
+    integer position when it does not, so the mapping carries whichever applies.
+    """
+    if has_header:
+        return column
+    try:
+        return int(column)
+    except ValueError:
+        raise HTTPException(
+            422,
+            "Column mapping addressed a headerless CSV by name; a 0-based column index is required.",
+        ) from None
+
+
 def parse_transactions(
     csv_text: str, column_mapping: ColumnMapping
 ) -> list[Transaction]:
+    has_header = column_mapping.has_header
+    date = column_label(column_mapping.date_column, has_header)
+    amount = column_label(column_mapping.amount_column, has_header)
+    description = column_label(column_mapping.description_column, has_header)
+
     df = pd.read_csv(
         io.StringIO(csv_text),
+        header=0 if has_header else None,
         skiprows=column_mapping.skip_rows,
         delimiter=column_mapping.delimiter,
-        parse_dates=[column_mapping.date_column],
+        parse_dates=[date],
         date_format=column_mapping.date_format,
         decimal=column_mapping.amount_separator,
-        usecols=[
-            column_mapping.date_column,
-            column_mapping.amount_column,
-            column_mapping.description_column,
-        ],
+        usecols=[date, amount, description],
     )
 
+    df = df.rename(columns={date: "date", amount: "amount", description: "description"})
+    # Some exports right-pad descriptions to a fixed width; that padding is a
+    # formatting artefact, not data, and would fragment shape() buckets later.
+    df["description"] = df["description"].str.strip()
     df = df.where(pd.notna(df), None)
-    df = df.rename(
-        columns={
-            column_mapping.date_column: "date",
-            column_mapping.amount_column: "amount",
-            column_mapping.description_column: "description",
-        }
-    )
     return [Transaction.model_validate(row) for row in df.to_dict(orient="records")]
 
 

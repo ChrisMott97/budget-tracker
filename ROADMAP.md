@@ -42,9 +42,12 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] Playwright end-to-end test for the CSV upload flow
 - [~] Eval set: sample CSVs from several banks with expected column mappings, run in CI.
       Synthetic fixtures for NatWest, Amex, Monzo, Starling and HSBC live in
-      `sample-data/` (added 2026-09-09). Expected mappings and the CI runner are
-      still to do. `hsbc.csv` is headerless and currently loses its first row
-      silently -- see `sample-data/README.md`.
+      `sample-data/` (added 2026-09-09). Expected mappings landed 2026-09-09 as
+      `api/tests/test_fixtures.py`: all five parse, asserted on row count and first
+      and last transaction, plus a no-rows-lost invariant, running in CI via pytest.
+      The headerless `hsbc.csv` row loss is fixed by `has_header` on `ColumnMapping`.
+      Still to do: run real model inference against those expected mappings and
+      score it, rather than only pinning the parser.
 - [ ] Observability: structured logs and error alerting
 
 ## 6. Product
@@ -52,6 +55,11 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] Get five real users and record what changed as a result
 
 ## Decisions log
+- 2026-09-09: `ColumnMapping` addresses columns by pandas label -- a name when
+  `has_header` is true, a 0-based index as a string when it is false -- rather than
+  adding a parallel set of `*_index` fields. One set of fields, one source of truth,
+  and it mirrors how pandas itself labels columns. Closes the silent row loss on
+  headerless CSVs (`hsbc.csv`).
 - 2026-09-09: Parked the LLM regex-inference spike for description parsing. It sent six raw sample descriptions to Gemini to get parsing regexes back, was never wired into a response, and broke on CSVs with fewer than six distinct shapes. Removed from `main.py`; the tested `shape()` anonymiser is kept. Revisit the approach (likely: inspect real samples per shape by hand first) under milestone 1.
 - 2026-09-09: Stay on the Gemini free tier during development. Real bank statements are not uploaded until the provider decision in milestone 3 is made.
 - 2026-09-09: Frontend stack: Vite + React SPA with TanStack Query for server state. Next.js rejected for this project because the app is a static bundle talking to a Python API, so SSR buys nothing and a Next.js host would hide the S3 + CloudFront Terraform work that milestone 4 exists to demonstrate. Next.js goes to the second project, where SSR and a TypeScript backend actually apply. TanStack Query owns request state (in-flight, error, retry, cache) so hooks stop hand-rolling it; the cache earns its keep in milestone 2 when imports and transactions become persisted server state.
