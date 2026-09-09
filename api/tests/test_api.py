@@ -37,11 +37,22 @@ MAPPING = {
 }
 
 
+# The trailing `{"links": []}` answers the payee-categorisation pass, which every
+# completed request now makes because `MAPPING` carries no bank category column.
 @pytest.fixture
 def fake_client(monkeypatch):
-    client = FakeClient([MAPPING])
+    client = FakeClient([MAPPING, {"links": []}])
     monkeypatch.setattr(api, "get_client", lambda: client)
     return client
+
+
+@pytest.fixture(autouse=True)
+def _clear_caches():
+    api._CATEGORY_MAP_CACHE.clear()
+    api._PAYEE_CATEGORY_CACHE.clear()
+    yield
+    api._CATEGORY_MAP_CACHE.clear()
+    api._PAYEE_CATEGORY_CACHE.clear()
 
 
 def post_csv(csv_text: str):
@@ -149,6 +160,8 @@ def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
             # payee is embedded, so layer B runs; a null slot leaves the
             # descriptor whole, which is what this test asserts on.
             {"assignments": [{"payee": None}]},
+            # the payee-categorisation pass; no category is asserted here.
+            {"links": []},
         ]
     )
     monkeypatch.setattr(api, "get_client", lambda: client)
@@ -186,15 +199,14 @@ def test_transactions_endpoint_rejects_a_field_map_missing_a_required_fact(monke
 
 
 def test_exact_payee_skips_layer_b(fake_client):
-    """An `exact` payee needs no slot inference, so only layer A is called."""
+    """An `exact` payee needs no slot inference: layer A, then the payee pass, no layer B."""
     post_csv("Date,Description,Amount\n2025-03-12,TESCO STORES,-12.50\n")
 
-    assert len(fake_client.calls) == 1
+    assert len(fake_client.calls) == 2
 
 
 def test_exact_category_is_remapped_to_a_preset(monkeypatch):
     """A bank category column is mapped set-to-set; a null target leaves the row None."""
-    api._CATEGORY_MAP_CACHE.clear()
     layer_a = {
         "fields": {
             "date": exact("Date"),
@@ -209,7 +221,9 @@ def test_exact_category_is_remapped_to_a_preset(monkeypatch):
             {"source": "Transfers", "target": None},
         ]
     }
-    client = FakeClient([layer_a, category_map])
+    # Alice's bank label maps to null, so her row reaches the payee pass, which
+    # also finds nothing -- she stays uncategorised.
+    client = FakeClient([layer_a, category_map, {"links": []}])
     monkeypatch.setattr(api, "get_client", lambda: client)
 
     csv_text = (
@@ -220,7 +234,7 @@ def test_exact_category_is_remapped_to_a_preset(monkeypatch):
 
     body = post_csv(csv_text).json()
 
-    assert len(client.calls) == 2
+    assert len(client.calls) == 3
     assert [(row["description"], row["category"]) for row in body] == [
         ("Tesco", "Groceries"),
         ("Alice", None),
@@ -238,7 +252,7 @@ def test_embedded_payee_endpoint_narrows_descriptions_to_the_payee_slot(monkeypa
     }
     # The three rows share the refined shape `PFX W+` (scheme prefix, then payee),
     # so layer B answers with one assignment: the payee is slot 1.
-    client = FakeClient([layer_a, {"assignments": [{"payee": 1}]}])
+    client = FakeClient([layer_a, {"assignments": [{"payee": 1}]}, {"links": []}])
     monkeypatch.setattr(api, "get_client", lambda: client)
 
     csv_text = (
@@ -250,9 +264,49 @@ def test_embedded_payee_endpoint_narrows_descriptions_to_the_payee_slot(monkeypa
 
     body = post_csv(csv_text).json()
 
-    assert len(client.calls) == 2
+    assert len(client.calls) == 3
     assert [row["description"] for row in body] == [
         "BRIGHTFORD LTD SALARY",
         "VODAFONE LTD",
         "BOKKA CAFE LISBOA",
     ]
+
+
+def test_payee_categorises_rows_with_no_bank_category(monkeypatch):
+    """No bank category column: rows are categorised from their distinct payees."""
+    payee_map = {"links": [{"source": "TESCO STORES", "target": "Groceries"}]}
+    client = FakeClient([MAPPING, payee_map])
+    monkeypatch.setattr(api, "get_client", lambda: client)
+    csv_text = (
+        "Date,Description,Amount\n"
+        "2025-03-01,TESCO STORES,-12.50\n"
+        "2025-03-02,TESCO STORES,-4.00\n"
+    )
+
+    body = post_csv(csv_text).json()
+
+    assert len(client.calls) == 2
+    assert [row["category"] for row in body] == ["Groceries", "Groceries"]
+
+
+def test_payee_fallback_fills_a_row_left_null_by_the_bank_mapping(monkeypatch):
+    """A bank label that fit no preset is retried against the payee."""
+    layer_a = {
+        "fields": {
+            "date": exact("Date"),
+            "amount": exact("Amount"),
+            "payee": exact("Name"),
+            "category": exact("Category"),
+        }
+    }
+    category_map = {"links": [{"source": "Misc", "target": None}]}
+    payee_map = {"links": [{"source": "TFL TRAVEL", "target": "Transport"}]}
+    client = FakeClient([layer_a, category_map, payee_map])
+    monkeypatch.setattr(api, "get_client", lambda: client)
+
+    csv_text = "Date,Name,Amount,Category\n2026-08-01,TFL TRAVEL,-2.80,Misc\n"
+
+    body = post_csv(csv_text).json()
+
+    assert len(client.calls) == 3
+    assert body[0]["category"] == "Transport"

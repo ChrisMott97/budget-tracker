@@ -144,8 +144,20 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       payee-based fallback for those rows is the next item; `CATEGORY_PRESETS` has no
       "Other" so null stays meaningful. `api/tests/test_category.py` pins the mapping,
       the code-side validation and the cache; `test_api.py` covers the endpoint path.
-- [ ] Categorise by payee where no bank category exists: distinct payees only, never
-      whole rows, and the cache stays warm across users.
+- [x] Categorise by payee where no bank category exists 2026-09-09. After the
+      set-to-set bank-label mapping, `csv_to_transactions` collects the distinct
+      `row.description` values of every still-uncategorised row (no bank category
+      column, or a label that fit no preset) and `resolve_payee_categories` maps
+      that set onto `CATEGORY_PRESETS` in one call -- `infer_payee_categories`, a
+      payee-worded twin of `infer_category_map`, sees only the payee strings and
+      the presets and answers with a preset enum member or null, re-checked in
+      code. `_PAYEE_CATEGORY_CACHE` is keyed per payee (not per set like
+      `_CATEGORY_MAP_CACHE`) on `(payee, CATEGORY_LIST_VERSION)`, so two imports
+      from different users share every merchant in common and an omitted payee is
+      cached null rather than re-queried. `test_payee_category.py` pins the
+      mapping, the code-side check and the per-payee cache; `test_api.py` covers
+      the no-category and null-fallback endpoint paths. Live model run deferred to
+      the milestone-5 eval.
 - [ ] Show categories in the table and allow manual override, plus the bank-to-preset
       mapping as an inspectable, editable table -- the mapping is a stored object, not
       a per-row model guess.

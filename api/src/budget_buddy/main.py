@@ -591,20 +591,25 @@ class CategoryMap(BaseModel):
     links: list[CategoryLink] = Field(default_factory=list)
 
 
-def category_map_schema() -> dict[str, Any]:
-    """`CategoryMap`'s schema, every property required and `target` a preset enum.
+def _preset_target_schema(model: type[BaseModel], def_name: str) -> dict[str, Any]:
+    """`model`'s schema, every property required and its link `target` a preset enum.
 
     Constraining `target` on the wire is a guard in front of the code-side check in
-    `infer_category_map`: the model picks from the closed preset list rather than
-    free-typing a category it could get subtly wrong. The null branch is kept so
-    "no preset fits" stays expressible.
+    the caller: the model picks from the closed preset list rather than free-typing
+    a category it could get subtly wrong. The null branch is kept so "no preset
+    fits" stays expressible. Shared by the bank-label map and the payee map, which
+    differ only in their link definition's name.
     """
-    schema = _required_everywhere(CategoryMap.model_json_schema())
-    schema["$defs"]["CategoryLink"]["properties"]["target"]["anyOf"] = [
+    schema = _required_everywhere(model.model_json_schema())
+    schema["$defs"][def_name]["properties"]["target"]["anyOf"] = [
         {"type": "string", "enum": list(CATEGORY_PRESETS)},
         {"type": "null"},
     ]
     return schema
+
+
+def category_map_schema() -> dict[str, Any]:
+    return _preset_target_schema(CategoryMap, "CategoryLink")
 
 
 def infer_category_map(
@@ -667,6 +672,94 @@ def resolve_category_map(
     return _CATEGORY_MAP_CACHE[key]
 
 
+class PayeeLink(BaseModel):
+    """One payee string and the preset it maps to, or null for no match."""
+
+    source: str = Field(description="A payee string, copied verbatim.")
+    target: str | None = Field(
+        None,
+        description=(
+            "The preset category this payee best fits, or null when none of them "
+            "fit or the payee is too generic to place."
+        ),
+    )
+
+
+class PayeeCategoryMap(BaseModel):
+    """The model's answer: one link per distinct payee, in any order."""
+
+    links: list[PayeeLink] = Field(default_factory=list)
+
+
+def payee_category_schema() -> dict[str, Any]:
+    return _preset_target_schema(PayeeCategoryMap, "PayeeLink")
+
+
+def infer_payee_categories(
+    payees: list[str], client: genai.Client
+) -> dict[str, str | None]:
+    """Map distinct transaction payees onto `CATEGORY_PRESETS`, set to set.
+
+    The fallback for rows a bank category column did not cover (or covered with a
+    label that fit no preset). One call for the whole distinct set, never per
+    transaction: the model sees only the payee strings and the presets, so a wrong
+    answer is a mislabelled bucket, not a corrupted row. A target outside the
+    preset list is dropped to null here as well as constrained on the wire.
+    """
+    prompt = (
+        "You are given a list of transaction payees -- merchants, people and "
+        "organisations -- and a fixed list of preset spending categories. Assign "
+        "each payee the preset it best fits, as JSON. Use null when no preset fits "
+        "or the payee is too generic to place. Never use a category outside the "
+        "preset list.\n\n"
+        f"Preset categories: {', '.join(CATEGORY_PRESETS)}\n\n"
+        f"Payees: {json.dumps(sorted(payees))}\n"
+    )
+    interaction = client.interactions.create(
+        model="gemini-flash-lite-latest",
+        input=prompt,
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": payee_category_schema(),
+        },
+    )
+
+    if not interaction.output_text:
+        raise HTTPException(502, "Model returned no output")
+
+    payee_map = PayeeCategoryMap.model_validate_json(interaction.output_text)
+    allowed = set(CATEGORY_PRESETS)
+    return {
+        link.source: link.target if link.target in allowed else None
+        for link in payee_map.links
+    }
+
+
+# Memoises payee -> preset one payee at a time, keyed on the preset list version.
+# Per-payee rather than per-set (unlike `_CATEGORY_MAP_CACHE`) so two imports --
+# from different users -- share every merchant they have in common.
+_PAYEE_CATEGORY_CACHE: dict[tuple[str, str], str | None] = {}
+
+
+def resolve_payee_categories(
+    payees: set[str], client: genai.Client
+) -> dict[str, str | None]:
+    """`infer_payee_categories` for only the payees not already cached.
+
+    A payee the model omits from its answer is cached as None, so it is not
+    re-queried on the next import; `CATEGORY_LIST_VERSION` in the key invalidates
+    the cache cleanly when the preset list changes.
+    """
+    version = CATEGORY_LIST_VERSION
+    missing = sorted(p for p in payees if (p, version) not in _PAYEE_CATEGORY_CACHE)
+    if missing:
+        fresh = infer_payee_categories(missing, client)
+        for payee in missing:
+            _PAYEE_CATEGORY_CACHE[(payee, version)] = fresh.get(payee)
+    return {p: _PAYEE_CATEGORY_CACHE[(p, version)] for p in payees}
+
+
 @app.post("/transactions")
 def csv_to_transactions(file: UploadFile) -> list[Transaction]:
     text, _ = decode_csv(file.file.read())
@@ -698,5 +791,15 @@ def csv_to_transactions(file: UploadFile) -> list[Transaction]:
             for row in rows:
                 if row.category is not None:
                     row.category = category_map.get(row.category)
+
+    # Rows still uncategorised -- no bank category column, or a bank label that fit
+    # no preset -- fall back to their payee. One call for the distinct payee set,
+    # each payee cached across imports and users.
+    uncategorised = {row.description for row in rows if row.category is None}
+    if uncategorised:
+        payee_map = resolve_payee_categories(uncategorised, client)
+        for row in rows:
+            if row.category is None:
+                row.category = payee_map.get(row.description)
 
     return rows
