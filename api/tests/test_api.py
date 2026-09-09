@@ -99,11 +99,14 @@ def test_transactions_endpoint_handles_fewer_than_six_shapes(fake_client):
 
 
 def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
-    """A headerless file used to lose its first row silently; all rows must survive."""
+    """A headerless file used to lose its first row silently; all rows must survive.
+
+    The canned answer says nothing about the header row -- `detect_dialect` supplies
+    that -- so this also covers the model addressing columns by index.
+    """
     client = FakeClient(
         [
             {
-                "has_header": False,
                 "date_format": "%d/%m/%Y",
                 "fields": {
                     "date": exact("0"),

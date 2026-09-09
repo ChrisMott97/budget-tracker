@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from budget_buddy.dialect import Dialect, detect_dialect
 from budget_buddy.main import (
     ColumnMapping,
     FieldMap,
@@ -169,3 +170,22 @@ def test_sample_csv_loses_no_rows(name: str):
 
     data_lines = len([line for line in text.splitlines() if line.strip()])
     assert len(rows) == data_lines - mapping.skip_rows - int(mapping.has_header)
+
+
+@pytest.mark.parametrize("name", FIXTURES)
+def test_detected_dialect_matches_the_expected_mapping(name: str):
+    """The sample set doubles as the eval for dialect detection, at no extra cost.
+
+    These three facts used to be inferred by the model alongside the field map; they
+    are now measured, so the fixtures pin the measurement against the same answers.
+    """
+    mapping, _, _, _ = FIXTURES[name]
+    text, _ = decode_csv((SAMPLE_DATA / name).read_bytes())
+
+    detected = detect_dialect(text)
+
+    assert detected == Dialect(
+        skip_rows=mapping.skip_rows,
+        delimiter=mapping.delimiter,
+        has_header=mapping.has_header,
+    )

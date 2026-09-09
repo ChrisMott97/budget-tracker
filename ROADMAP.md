@@ -31,12 +31,25 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       a 422 naming the fact. `response_schema()` marks every property required on the
       wire -- see the decisions log for why the nested schema needs that and the flat
       one did not.
-- [ ] **Wire the column profiler into the layer-A prompt.** `profile.py` is still
-      unused by `main.py`. Feeding a profile to the model needs the file's `delimiter`,
-      `has_header` and `skip_rows` *before* the call, and today those come back *from*
-      that call, so this is blocked on detecting the dialect in code first
-      (`csv.Sniffer`, stdlib, no new dependency). Worth landing alongside the
-      milestone 3 narrowing below, since both rewrite the same prompt.
+- [x] **Detect the dialect in code** 2026-09-09, no model involved. `delimiter`,
+      `has_header` and `skip_rows` are measured by `api/src/budget_buddy/dialect.py`
+      (`csv.Sniffer`, stdlib, no new dependency) and no longer appear in the schema
+      handed to the model, which now answers only `date_format`, `amount_separator`,
+      `fields` and `confidence` -- `ColumnMapping` is the measured `Dialect` plus that
+      `InferredMapping`. Sniffer alone is right on all five fixtures; the two shapes it
+      does not survive are handled around it. A leading preamble makes it fail outright
+      ("Could not determine delimiter"), so the offset is searched -- advance until a
+      sample sniffs, then until the field count settles on its mode. And `has_header`
+      is a type-comparison heuristic, so a first row containing a number overrides it
+      to "data": that is a fact about the file rather than a guess, and it is what
+      `hsbc.csv` needs. Every step falls back to the previous defaults, so detection
+      can only improve on where the parser stood. `test_fixtures.py` now asserts
+      detection against the dialect already pinned per fixture, so the sample set is
+      the eval for this too.
+- [ ] **Wire the column profiler into the layer-A prompt.** Unblocked by the dialect
+      work above but not yet done: `profile.py` is still unused by `main.py`. The
+      prompt still sends the first ten raw lines. Land it with the milestone 3
+      narrowing below, since both rewrite the same prompt.
 - [x] **Column profiler** 2026-09-09, no model involved: per column, cardinality
       ratio, mean token count, mean length, case profile with its consistency
       fraction, fill rate, and cross-column token containment. Landed as
@@ -145,6 +158,13 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] Get five real users and record what changed as a result
 
 ## Decisions log
+- 2026-09-09: Dialect detection landed as its own diff, ahead of the prompt rewrite it
+  exists to unblock, rather than alongside it as this file originally proposed. The two
+  do share a prompt, but a mis-sniffed delimiter and a badly narrowed prompt would
+  otherwise arrive as one indistinguishable failure -- the same reasoning that split
+  layer A from the profiler. The model is no longer asked anything `csv.Sniffer` can
+  measure, on the general principle already governing this milestone: ask the model
+  about patterns, never about facts code can establish.
 - 2026-09-09: The schema handed to the model marks every property required, added after
   the first live run of the nested field map came back with all nine facts `absent`.
   Pydantic omits `required` for any field carrying a default, so the generated schema

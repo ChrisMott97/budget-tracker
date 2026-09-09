@@ -9,6 +9,8 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from google import genai
 from pydantic import BaseModel, Field, model_validator
 
+from budget_buddy.dialect import Dialect, detect_dialect
+
 app = FastAPI()
 
 
@@ -23,10 +25,9 @@ class Transaction(BaseModel):
     amount: float
 
 
-COLUMN_HINT = (
-    "Column name when has_header is true, otherwise the 0-based column index "
-    'as a string, e.g. "0".'
-)
+# The file's header row is measured, not inferred, so which of the two addressing
+# schemes applies is stated in the prompt rather than left to the model.
+COLUMN_HINT = "Column name, or the 0-based column index as a string, as instructed."
 
 Purity = Literal["exact", "embedded", "absent"]
 
@@ -118,18 +119,14 @@ class FieldMap(BaseModel):
     )
 
 
-class ColumnMapping(BaseModel):
-    skip_rows: int = Field(
-        0, description="Number of rows to skip at the start of the CSV file."
-    )
-    delimiter: str = Field(",", description="Delimiter used in the CSV file.")
-    has_header: bool = Field(
-        True,
-        description=(
-            "True if the first row after skip_rows contains column names rather "
-            "than transaction data."
-        ),
-    )
+class InferredMapping(BaseModel):
+    """The half of the mapping a model has to answer, and the whole of its schema.
+
+    The dialect is deliberately not here: `dialect.detect_dialect` measures it from
+    the file, so asking the model for it would be asking a question that already has
+    an answer -- and one the profiler needs *before* the call can be made.
+    """
+
     date_format: str = Field(
         "%Y-%m-%d",
         description="Python strptime format string for parsing dates in the date column.",
@@ -144,6 +141,14 @@ class ColumnMapping(BaseModel):
     confidence: float = Field(
         0.8, description="Confidence that the date format is correct."
     )
+
+
+class ColumnMapping(InferredMapping, Dialect):
+    """Everything the parser needs: the measured dialect plus the inferred mapping.
+
+    Inheritance rather than composition keeps the field set flat, so the parser and
+    the fixtures address `has_header` and `fields` on one object as they always have.
+    """
 
 
 def decode_csv(raw: bytes) -> tuple[str, str]:
@@ -176,12 +181,25 @@ def response_schema() -> dict[str, Any]:
     skipped, so the schema the model is handed asks for every fact and both halves of
     each one. `column` stays nullable, which turns "no such column" into something the
     model must state rather than something it can omit.
+
+    Built from `InferredMapping`, not `ColumnMapping`: the dialect fields are measured
+    from the file, so they never reach the wire.
     """
-    return _required_everywhere(ColumnMapping.model_json_schema())
+    return _required_everywhere(InferredMapping.model_json_schema())
 
 
-def infer_column_mapping(csv_text: str, client: genai.Client) -> ColumnMapping:
-    head = "\n".join(csv_text.splitlines()[:10])
+def infer_column_mapping(
+    csv_text: str, client: genai.Client, dialect: Dialect
+) -> ColumnMapping:
+    head = "\n".join(csv_text.splitlines()[dialect.skip_rows :][:10])
+    # How to address a column depends on whether the file has a header, and the model
+    # no longer decides that, so it has to be told which of the two answers to give.
+    addressing = (
+        "The first line below is the header row; name each column by its header."
+        if dialect.has_header
+        else "This file has no header row; identify each column by its 0-based "
+        'index, as a string, e.g. "0".'
+    )
     prompt = (
         "This is the start of a CSV file of bank transactions. Do not parse or "
         "return any transaction data. Describe where each fact lives, as JSON.\n\n"
@@ -193,6 +211,7 @@ def infer_column_mapping(csv_text: str, client: genai.Client) -> ColumnMapping:
         "- absent: the file does not carry the fact at all. Use a null column.\n\n"
         "Two facts may name the same column when both are embedded in it. Prefer a "
         "dedicated column over an embedded one when the file offers both.\n\n"
+        f"{addressing}\n\n"
         "The first lines of the CSV file are:\n\n"
     )
     interaction = client.interactions.create(
@@ -208,7 +227,8 @@ def infer_column_mapping(csv_text: str, client: genai.Client) -> ColumnMapping:
     if not interaction.output_text:
         raise HTTPException(502, "Model returned no output")
 
-    return ColumnMapping.model_validate_json(interaction.output_text)
+    inferred = InferredMapping.model_validate_json(interaction.output_text)
+    return ColumnMapping(**dialect.model_dump(), **inferred.model_dump())
 
 
 def column_label(column: str, has_header: bool) -> str | int:
@@ -343,8 +363,9 @@ def shape(desc: str) -> str:
 def csv_to_transactions(file: UploadFile) -> list[Transaction]:
     text, _ = decode_csv(file.file.read())
 
+    dialect = detect_dialect(text)
     client = get_client()
-    column_mapping = infer_column_mapping(text, client)
+    column_mapping = infer_column_mapping(text, client, dialect)
 
     rows = parse_transactions(text, column_mapping)
 
