@@ -77,16 +77,41 @@ def test_transactions_endpoint_returns_parsed_rows(fake_client):
     }
 
 
-def test_column_mapping_prompt_only_sees_the_csv_head(fake_client):
-    csv_text = "Date,Description,Amount\n" + "\n".join(
-        f"2025-03-01,ROW{i} SHAPE{i} {'X' * i} {i:0{i}d},-1.00" for i in range(1, 15)
+def test_column_mapping_prompt_sends_profile_stats_not_raw_rows(fake_client):
+    """The prompt carries the anonymised profile, never a transaction row."""
+    rows = [
+        ("2025-03-01", "TESCO STORES 4021 LONDON", "-14.30"),
+        ("2025-03-02", "KOFFEEWERK ROASTERY BERLIN", "-3.80"),
+        ("2025-03-03", "ALEX HOLLOWAY RENT JULY", "-780.00"),
+    ]
+    csv_text = "Date,Description,Amount\n" + "\n".join(",".join(row) for row in rows)
+
+    post_csv(csv_text)
+    prompt = fake_client.calls[0]
+
+    assert "cardinality_ratio" in prompt
+    assert "case_profile" in prompt
+    for date, description, amount in rows:
+        assert f"{date},{description},{amount}" not in prompt
+
+
+def test_column_mapping_prompt_decorrelates_sampled_values(fake_client):
+    """Sample values are sorted per column, so no aligned pair is a real row's pair."""
+    csv_text = "Date,Description,Amount,Reference\n" + "\n".join(
+        f"2025-03-0{n},PAYEE{n},-{n}.00,REF{9 - n}" for n in range(1, 5)
     )
 
     post_csv(csv_text)
+    prompt = fake_client.calls[0]
 
-    head_prompt = fake_client.calls[0]
-    assert "ROW1" in head_prompt
-    assert "ROW14" not in head_prompt
+    for n in range(1, 5):
+        assert f"2025-03-0{n},PAYEE{n},-{n}.00,REF{9 - n}" not in prompt
+
+    profile = json.loads(prompt[prompt.index("{") :])
+    samples = {column["label"]: column["samples"] for column in profile["columns"]}
+    for payee, reference in zip(samples["Description"], samples["Reference"]):
+        n = int(payee.removeprefix("PAYEE"))
+        assert reference != f"REF{9 - n}"
 
 
 def test_transactions_endpoint_handles_fewer_than_six_shapes(fake_client):

@@ -25,6 +25,6 @@ Bank-statement CSV importer. An LLM infers the column mapping and, later, catego
 
 ## Data handling
 - Data minimisation is the product's security story. Send the model the least raw data possible: the anonymised `shape()` output, headers, or a small explicit sample.
-- Current exception, to be closed under ROADMAP milestone 3: `infer_column_mapping` sends the first ten raw CSV lines. Do not add any new path that sends raw rows to a model.
+- Current exception, being narrowed under ROADMAP milestone 3: `infer_column_mapping` sends the anonymised column profile plus up to three sample values per column, chosen for least identifiability and sorted independently of row order, so no complete transaction row is transmitted. Layer A still needs some real values, so this narrows the exception rather than closing it; the remaining milestone-3 work is masking the layer-B slot samples. Do not add any new path that sends raw rows to a model.
 - Never log raw transaction descriptions or amounts.
 - No secrets in the repo. `api/.env` is gitignored and `api/.env.example` documents the keys.

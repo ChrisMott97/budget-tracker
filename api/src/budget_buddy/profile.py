@@ -45,6 +45,11 @@ CONTAINMENT_THRESHOLD = 0.75
 # keeps a profile reproducible where a random sample would not.
 CONTAINMENT_SAMPLE_ROWS = 200
 
+# How many example values per column layer A is handed. Enough for the model to
+# tell a merchant from an account holder; few enough that one column's samples
+# plus the profile never amount to a transaction.
+PROMPT_SAMPLE_SIZE = 3
+
 CaseProfile = Literal["UPPER", "lower", "Mixed", "none"]
 
 
@@ -217,15 +222,70 @@ def find_containments(
     )
 
 
-def profile_columns(frame: pd.DataFrame) -> FileProfile:
-    """Profile every column of an all-text frame from `read_raw_frame`."""
-    columns = {
+def raw_columns(frame: pd.DataFrame) -> dict[str, list[str]]:
+    """The `{label: [stripped values]}` view every function in this module works from."""
+    return {
         str(label): [str(value).strip() for value in frame[label]]
         for label in frame.columns
     }
+
+
+def profile_columns(frame: pd.DataFrame) -> FileProfile:
+    """Profile every column of an all-text frame from `read_raw_frame`."""
+    columns = raw_columns(frame)
     profiles = [profile_column(label, values) for label, values in columns.items()]
     return FileProfile(
         row_count=len(frame),
         columns=profiles,
         containments=find_containments(columns, profiles),
     )
+
+
+def file_token_frequencies(columns: dict[str, list[str]]) -> Counter[str]:
+    """Upper-cased token counts across every non-empty cell of every column.
+
+    Upper-casing matches `find_containments`, so `Tesco` and `TESCO` count as one
+    token. This is the "how common is this token across the file" table the sample
+    selection leans on.
+    """
+    freq: Counter[str] = Counter()
+    for values in columns.values():
+        for value in values:
+            if value:
+                freq.update(token.upper() for token in tokens(value))
+    return freq
+
+
+def sample_column_values(
+    columns: dict[str, list[str]], *, size: int = PROMPT_SAMPLE_SIZE
+) -> dict[str, list[str]]:
+    """Up to `size` example values per column, chosen and ordered to leak the least.
+
+    Layer A genuinely needs some real values -- structure tells you a column is
+    name-shaped but not whether the name is a merchant or the account holder (see
+    the decisions log). This narrows that exposure two ways:
+
+    - Selection is biased toward values whose tokens recur across the file, so a
+      once-only merchant name is passed over in favour of a `PAYMENT` or
+      `DIRECT DEBIT` that identifies nobody. A value's score is the mean file
+      frequency of its tokens.
+    - The returned order is `sorted()` on the value string, decorrelated from row
+      order and independent per column, so the samples for two columns carry no
+      positional relationship and no transaction row can be reassembled.
+
+    Deterministic throughout: same file in, same samples out.
+    """
+    freq = file_token_frequencies(columns)
+
+    def score(value: str) -> float:
+        value_tokens = [token.upper() for token in tokens(value)]
+        if not value_tokens:
+            return 0.0
+        return sum(freq[token] for token in value_tokens) / len(value_tokens)
+
+    sampled: dict[str, list[str]] = {}
+    for label, values in columns.items():
+        distinct = sorted({value for value in values if value})
+        chosen = sorted(distinct, key=lambda value: (-score(value), value))[:size]
+        sampled[label] = sorted(chosen)
+    return sampled

@@ -15,6 +15,7 @@ from budget_buddy.profile import (
     ColumnProfile,
     profile_columns,
     read_raw_frame,
+    sample_column_values,
 )
 
 SAMPLE_DATA = Path(__file__).parents[2] / "sample-data"
@@ -171,6 +172,47 @@ def test_read_raw_frame_keeps_a_literal_na_as_text():
 
     assert profile_of(frame, "Payee").fill_rate == 1.0
     assert profile_of(frame, "Notes").fill_rate == 0.0
+
+
+def test_sample_column_values_prefers_values_built_from_common_tokens():
+    """A once-only merchant name is passed over for a value whose tokens recur file-wide."""
+    columns = {
+        "Description": [
+            "DIRECT DEBIT VODAFONE",
+            "DIRECT DEBIT BRITISH GAS",
+            "DIRECT DEBIT COUNCIL",
+            "CARD PAYMENT KOFFEEWERK ROASTERY",
+        ],
+        "Type": ["DIRECT DEBIT", "DIRECT DEBIT", "DIRECT DEBIT", "CARD PAYMENT"],
+    }
+
+    samples = sample_column_values(columns, size=2)
+
+    assert "CARD PAYMENT KOFFEEWERK ROASTERY" not in samples["Description"]
+    assert "DIRECT DEBIT VODAFONE" in samples["Description"]
+
+
+def test_sample_column_values_caps_at_the_requested_size():
+    columns = {"Payee": [f"MERCHANT {n}" for n in range(20)]}
+
+    assert len(sample_column_values(columns, size=3)["Payee"]) == 3
+
+
+def test_sample_column_values_order_is_independent_of_row_order():
+    """The emitted list is sorted, so shuffling the rows cannot change what is sent."""
+    forwards = {"Payee": ["ALPHA LTD", "BRAVO LTD", "CHARLIE LTD", "DELTA LTD"]}
+    backwards = {"Payee": list(reversed(forwards["Payee"]))}
+
+    assert sample_column_values(forwards) == sample_column_values(backwards)
+
+
+def test_sample_column_values_handles_a_single_row_and_empty_columns():
+    columns = {"Payee": ["TESCO"], "Notes": ["", "", ""]}
+
+    samples = sample_column_values(columns)
+
+    assert samples["Payee"] == ["TESCO"]
+    assert samples["Notes"] == []
 
 
 def fixture_frame(name: str) -> pd.DataFrame:

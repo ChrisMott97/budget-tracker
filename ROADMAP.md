@@ -46,10 +46,13 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       can only improve on where the parser stood. `test_fixtures.py` now asserts
       detection against the dialect already pinned per fixture, so the sample set is
       the eval for this too.
-- [ ] **Wire the column profiler into the layer-A prompt.** Unblocked by the dialect
-      work above but not yet done: `profile.py` is still unused by `main.py`. The
-      prompt still sends the first ten raw lines. Land it with the milestone 3
-      narrowing below, since both rewrite the same prompt.
+- [x] **Wire the column profiler into the layer-A prompt** 2026-09-09.
+      `infer_column_mapping` now builds a raw frame via `profile.read_raw_frame`,
+      runs `profile_columns` and `sample_column_values` over it, and hands the model
+      a JSON profile (per-column stats, containments, and the samples below) instead
+      of the CSV head. The prompt explains how to read cardinality, case, token
+      count and containment. Landed together with the milestone 3 narrowing below,
+      as planned, since both rewrite the same prompt.
 - [x] **Column profiler** 2026-09-09, no model involved: per column, cardinality
       ratio, mean token count, mean length, case profile with its consistency
       fraction, fill rate, and cross-column token containment. Landed as
@@ -112,13 +115,16 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 
 ## 3. Data protection
 - [~] Gemini API tier: free tier during development (decided 2026-09-09). Google may use prompts for product improvement and human review on this tier, so only synthetic or scrubbed CSVs are used in development, never real statements. Revisit before any deploy with real users.
-- [ ] Narrow the column-mapping exception: replace the first ten raw lines with
-      headers, the column profile, and roughly three values sampled *independently per
-      column and shuffled*, so what is transmitted never reassembles into a complete
-      transaction. Bias sampling toward values whose tokens are common across the
-      file, so the least identifying examples are the ones sent. This narrows the
-      exception rather than closing it -- see the decisions log: layer A needs some
-      real values, and pretending otherwise would be dishonest in the DPIA.
+- [x] Narrow the column-mapping exception 2026-09-09. The raw CSV head is gone;
+      `infer_column_mapping` sends headers, the column profile, and up to three
+      sample values per column. `profile.sample_column_values` picks those values by
+      the mean file-wide frequency of their tokens, so a once-only merchant name
+      loses to a `DIRECT DEBIT` that identifies nobody, and returns them `sorted()`
+      per column -- decorrelated from row order and independent across columns, so no
+      complete transaction can be reassembled. Deterministic, not a random shuffle
+      (decisions log). This narrows the exception rather than closing it: layer A
+      still needs some real values, and pretending otherwise would be dishonest in
+      the DPIA.
 - [ ] Mask word tokens in layer B slot-inference samples, where the question is purely
       structural and masking costs nothing. Explicitly not applicable to layer A.
 - [ ] Decide the production model provider: Gemini developer API vs Vertex AI (DPA, London region) vs Bedrock (same AWS account and region as the deploy). Recommendation: Bedrock for production, Gemini for local development.
@@ -158,6 +164,14 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] Get five real users and record what changed as a result
 
 ## Decisions log
+- 2026-09-09: The column profiler was wired into the layer-A prompt and the raw CSV
+  head it replaced was dropped in the same diff, as the milestone-1 wiring item
+  anticipated -- both rewrite the same prompt, so splitting them would have meant two
+  churny passes over it. Sample-value selection is deterministic (top-k by token
+  commonality, then `sorted()`) rather than a random shuffle: decorrelation only
+  needs the emitted order to carry no row information, and a reproducible profile is
+  worth more than a shuffled one -- the same reasoning as the head-slice and sorted
+  tie-breaks already in `profile.py`.
 - 2026-09-09: Dialect detection landed as its own diff, ahead of the prompt rewrite it
   exists to unblock, rather than alongside it as this file originally proposed. The two
   do share a prompt, but a mis-sniffed delimiter and a badly narrowed prompt would

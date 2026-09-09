@@ -1,5 +1,6 @@
 import datetime
 import io
+import json
 import re
 from functools import lru_cache
 from typing import Any, Literal
@@ -10,6 +11,12 @@ from google import genai
 from pydantic import BaseModel, Field, model_validator
 
 from budget_buddy.dialect import Dialect, detect_dialect
+from budget_buddy.profile import (
+    profile_columns,
+    raw_columns,
+    read_raw_frame,
+    sample_column_values,
+)
 
 app = FastAPI()
 
@@ -188,21 +195,66 @@ def response_schema() -> dict[str, Any]:
     return _required_everywhere(InferredMapping.model_json_schema())
 
 
+def profile_prompt_block(csv_text: str, dialect: Dialect) -> str:
+    """The anonymised profile layer A reasons over, as pretty JSON.
+
+    Per column: the measured statistics from `profile_columns`, plus up to three
+    example values from `sample_column_values` -- sorted, decorrelated from row
+    order and chosen for least identifiability, so the block never reassembles
+    into a transaction. Replaces the raw CSV head this function used to send.
+    """
+    frame = read_raw_frame(
+        csv_text,
+        skip_rows=dialect.skip_rows,
+        delimiter=dialect.delimiter,
+        has_header=dialect.has_header,
+    )
+    profile = profile_columns(frame)
+    samples = sample_column_values(raw_columns(frame))
+
+    payload = {
+        "row_count": profile.row_count,
+        "columns": [
+            {
+                "label": column.label,
+                "fill_rate": round(column.fill_rate, 2),
+                "cardinality_ratio": round(column.cardinality_ratio, 2),
+                "mean_token_count": round(column.mean_token_count, 2),
+                "mean_length": round(column.mean_length, 2),
+                "case_profile": column.case_profile,
+                "case_consistency": round(column.case_consistency, 2),
+                "samples": samples[column.label],
+            }
+            for column in profile.columns
+        ],
+        "containments": [
+            {
+                "contained": item.contained,
+                "container": item.container,
+                "fraction": round(item.fraction, 2),
+            }
+            for item in profile.containments
+        ],
+    }
+    return json.dumps(payload, indent=2)
+
+
 def infer_column_mapping(
     csv_text: str, client: genai.Client, dialect: Dialect
 ) -> ColumnMapping:
-    head = "\n".join(csv_text.splitlines()[dialect.skip_rows :][:10])
     # How to address a column depends on whether the file has a header, and the model
     # no longer decides that, so it has to be told which of the two answers to give.
     addressing = (
-        "The first line below is the header row; name each column by its header."
+        "The file has a header row; name each column by its header, which is the "
+        "label field in the profile."
         if dialect.has_header
         else "This file has no header row; identify each column by its 0-based "
-        'index, as a string, e.g. "0".'
+        'index as a string, e.g. "0", which is the label field in the profile.'
     )
     prompt = (
-        "This is the start of a CSV file of bank transactions. Do not parse or "
-        "return any transaction data. Describe where each fact lives, as JSON.\n\n"
+        "You are given an anonymised profile of a CSV file of bank transactions, "
+        "not the file itself. Do not parse or return any transaction data. Using "
+        "the profile, describe where each fact lives, as JSON.\n\n"
         "For every field, answer with the column that carries it and how purely "
         "that column carries it:\n"
         "- exact: the column holds that fact and nothing else.\n"
@@ -211,12 +263,22 @@ def infer_column_mapping(
         "- absent: the file does not carry the fact at all. Use a null column.\n\n"
         "Two facts may name the same column when both are embedded in it. Prefer a "
         "dedicated column over an embedded one when the file offers both.\n\n"
+        "How to read the profile:\n"
+        "- cardinality_ratio near 0 is a constant column, low is an enum such as a "
+        "txn_type or a bank category, near 1 is per-transaction data.\n"
+        "- A low mean_token_count in Mixed or Title case is a bank-cleaned "
+        "counterparty; a high token count in UPPER case is a raw descriptor with a "
+        "payee, and often a reference and a date, embedded in it.\n"
+        "- A containments entry means the contained column's value appears inside "
+        "the container column, so that fact is embedded in the container.\n"
+        "- samples are a few example values per column, sorted and independent of "
+        "row order: they do not line up across columns and are not real rows.\n\n"
         f"{addressing}\n\n"
-        "The first lines of the CSV file are:\n\n"
+        "The file profile is:\n\n"
     )
     interaction = client.interactions.create(
         model="gemini-flash-lite-latest",
-        input=prompt + head,
+        input=prompt + profile_prompt_block(csv_text, dialect),
         response_format={
             "type": "text",
             "mime_type": "application/json",
