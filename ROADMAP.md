@@ -75,17 +75,28 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       `Currency`/`Local currency`, both 0.93), and requiring the container to be
       strictly wider by mean token count. Starling `Counter Party` and `Reference`
       reach only 0.50 and stay silent, as intended.
-- [ ] **Bucket refinement** -- blocker for layer B, do this first. `shape()` collapses
-      word runs, so the dominant bucket is a bare `W+` on three of five fixtures
-      (14/23 Amex, 16/25 HSBC, 12/15 Monzo): `CR BRIGHTFORD LTD SALARY` and
-      `DD VODAFONE LTD` share a shape, and one slot spanning the whole string makes
-      slot assignment meaningless -- on exactly the banks that need extraction most.
-      Fix with a positional token-frequency table per bucket: tokens recurring at a
-      position across many rows are structural (`CR`, `DD`, `VIS`, `BP`, `)))`),
-      near-unique ones are the payee. Pure computation, no model. Caveat to keep
-      honest: "recurs often, therefore not personal" is a heuristic, not a guarantee
-      -- a monthly payment to a named individual recurs too -- so back it with a known
-      bank-prefix vocabulary rather than frequency alone.
+- [x] **Bucket refinement** 2026-09-09. `shape()` collapsed word runs, so the
+      dominant bucket was a bare `W+` on three of five fixtures (14/23 Amex,
+      16/25 HSBC, 12/15 Monzo) -- one slot over the whole string, useless for slot
+      assignment. `shapes.bucket_by_refined_shape` splits it, pure computation:
+      structural tokens are re-tagged `PFX` and only the payee run stays `W+`.
+      Two signals, each earned against the fixtures. The head is matched against a
+      curated `BANK_PREFIX_VOCAB` (`CR`, `DD`, `VIS`, `BP`, `SO`, `ATM`, `)))`,
+      plus common UK siblings) and *never* against frequency -- the caveat that a
+      monthly payment to a named individual recurs just as reliably is honoured by
+      never letting frequency touch the leading run. The tail is matched against a
+      per-bucket token-frequency table indexed *from the end* (a trailing location
+      sits a fixed offset from the end while the payee's length varies), gated on
+      the bucket having >= 3 distinct leading tokens so `ALEX HOLLOWAY RENT
+      <month>` x N is left whole rather than fragmented. Result: HSBC's `W+`
+      bucket collapses to `PFX W+` (19 rows, including the `)))` contactless
+      rows), Amex's 16-row `W+` drops to 7 with a `W+ PFX` sibling that isolates
+      the city. Monzo's `Description` stays put -- it is short and low-structure,
+      and Monzo's payee is the `exact` `Name` column anyway. Landed as
+      `api/src/budget_buddy/shapes.py` with `tokenise`/`classify`/`shape` moved
+      out of `main.py` (closing the duplicated tokeniser flagged in `profile.py`);
+      pinned in `api/tests/test_shapes.py`. Not wired into the endpoint -- layer B
+      consumes it next.
 - [ ] **Layer B -- slot assignment.** For `embedded` columns only, bucket rows by
       refined shape and have the model map each fact to a *slot index*, never a value:
       `"N4 DATE W+ , W+ , W+"` becomes `{card_last4: 0, date: 1, payee: 3,
@@ -164,6 +175,23 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] Get five real users and record what changed as a result
 
 ## Decisions log
+- 2026-09-09: Bucket refinement splits the head against a vocabulary and the tail
+  against frequency, not one rule for both. "Recurs at a position, therefore
+  structural" is the roadmap's proposed heuristic, but it fails at the head: a
+  monthly payment to `ALEX HOLLOWAY` puts `HOLLOWAY` at the same position on every
+  row just as `CR` does. So the leading run is matched only against
+  `BANK_PREFIX_VOCAB` (small, curated, non-personal), and frequency -- indexed
+  from the *end*, where locations and scheme suffixes sit at a fixed offset while
+  the payee varies in length -- is allowed only past the head, and only for a
+  bucket with >= 3 distinct leading tokens so a one-payee-repeated bucket is never
+  fragmented. `RECUR_FRACTION` (0.4) and `RECUR_MIN_ROWS` (3) are first-cut; layer
+  B is the first real consumer and will show whether they hold.
+- 2026-09-09: `tokenise`/`classify`/`shape` moved from `main.py` to a new
+  `shapes.py`, as the `profile.py` comment anticipated ("the shared tokeniser
+  moves to its own module when bucket refinement lands"). `main` -> `shapes` and
+  `profile` -> `shapes` both resolve without the cycle that forced the duplicated
+  `TOKEN_RE`; `shape()` output is unchanged (`_collapse_runs` is shared with
+  `refined_shape`, and the moved tests still pin it).
 - 2026-09-09: The column profiler was wired into the layer-A prompt and the raw CSV
   head it replaced was dropped in the same diff, as the milestone-1 wiring item
   anticipated -- both rewrite the same prompt, so splitting them would have meant two

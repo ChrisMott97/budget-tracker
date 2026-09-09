@@ -1,7 +1,6 @@
 import datetime
 import io
 import json
-import re
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -350,77 +349,6 @@ def parse_transactions(
     return [Transaction.model_validate(row) for row in df.to_dict(orient="records")]
 
 
-TOKEN_RE = re.compile(r"(?P<comma>\s*,\s*)|(?P<space>\s+)|(?P<word>[^\s,]+)")
-
-# TODO: extend to other date formats
-DATE_RE = re.compile(
-    r"""^(
-    \d{1,2}[A-Z]{3}\d{2,4}          # 12MAR25
-  | \d{1,2}[/-]\d{1,2}[/-]\d{2,4}   # 12/03/25
-  | \d{4}-\d{2}-\d{2}               # 2025-03-12
-)$""",
-    re.VERBOSE,
-)
-
-WORD_RE = re.compile(r"[*]?[^\W\d_][\w'&.\-*]*", re.UNICODE)
-
-
-def classify(tok: str) -> str:
-    if DATE_RE.match(tok):
-        return "DATE"
-    if re.fullmatch(r"\d+", tok):
-        return f"N{len(tok)}" if len(tok) <= 6 else "N+"
-    if tok == "&":
-        return "AMP"
-    if WORD_RE.fullmatch(tok):
-        return "W"
-    return "X"
-
-
-def tokenise(desc: str) -> list[tuple[str, str, int, int]]:
-    """Returns [(kind, text, start, end)] covering the whole string."""
-    out = []
-    for m in TOKEN_RE.finditer(desc):
-        kind = m.lastgroup
-        out.append((kind, m.group(), m.start(), m.end()))
-    return out
-
-
-def shape(desc: str) -> str:
-    toks = [
-        (classify(t), t) for k, t, _, _ in tokenise(desc) if k == "word" or k == "comma"
-    ]
-    toks = [("COMMA", t) if t.strip() == "," else (c, t) for c, t in toks]
-
-    parts, run, i = [], False, 0
-    while i < len(toks):
-        cls, _ = toks[i]
-
-        if cls == "COMMA":
-            parts.append(",")
-            run = False
-
-        elif cls == "AMP":
-            nxt = toks[i + 1][0] if i + 1 < len(toks) else None
-            if run and nxt == "W":
-                i += 2  # swallow the & and the word after it
-                continue
-            run = False
-            parts.append("X")  # dangling &, treat as junk
-
-        elif cls == "W":
-            if not run:
-                parts.append("W+")
-                run = True
-
-        else:
-            parts.append(cls)
-            run = False
-
-        i += 1
-    return " ".join(parts)
-
-
 @app.post("/transactions")
 def csv_to_transactions(file: UploadFile) -> list[Transaction]:
     text, _ = decode_csv(file.file.read())
@@ -431,6 +359,6 @@ def csv_to_transactions(file: UploadFile) -> list[Transaction]:
 
     rows = parse_transactions(text, column_mapping)
 
-    # Next (ROADMAP milestone 1): use shape() to bucket descriptions and pull
-    # counterparty/reference out of them without sending raw text to the model.
+    # Next (ROADMAP milestone 1, layer B): shapes.bucket_by_refined_shape groups
+    # the descriptions, then the model maps each fact to a slot index per bucket.
     return rows

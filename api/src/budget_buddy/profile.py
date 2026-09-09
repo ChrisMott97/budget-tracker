@@ -23,18 +23,13 @@ What the measurements do and do not separate, against `sample-data/`:
 
 import io
 import itertools
-import re
 from collections import Counter
 from typing import Literal
 
 import pandas as pd
 from pydantic import BaseModel, Field
 
-# Matches the `word` alternative of main.TOKEN_RE. Duplicated rather than
-# imported because main.py constructs the FastAPI app and the dependency will
-# eventually run main -> profile; the shared tokeniser moves to its own module
-# when bucket refinement lands.
-TOKEN_RE = re.compile(r"[^\s,]+")
+from budget_buddy.shapes import word_tokens as tokens
 
 # Monzo `Name` is contained in `Description` on 0.80 of rows and is the signal we
 # want. Starling `Counter Party` in `Reference` reaches only 0.50 and Monzo
@@ -136,10 +131,6 @@ def case_of(value: str) -> CaseProfile:
     if all(char.islower() for char in letters):
         return "lower"
     return "Mixed"
-
-
-def tokens(value: str) -> list[str]:
-    return TOKEN_RE.findall(value)
 
 
 def profile_column(label: str, values: list[str]) -> ColumnProfile:
