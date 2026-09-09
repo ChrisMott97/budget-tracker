@@ -9,14 +9,19 @@ help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
+# uv run does not read api/.env on its own, so pass it explicitly when it exists
+# (fall back to no env file so the server still starts without a key -- it just
+# can't reach the model). Keep this in sync with the dev-server line in CLAUDE.md.
+ENV_FILE = $$([ -f .env ] && echo --env-file .env)
+
 dev: ## Run the API (:8000) and app (:5173) together; Ctrl-C stops both
 	@trap 'kill 0' INT TERM EXIT; \
-	(cd api && uv run fastapi dev src/budget_buddy/main.py) & \
+	(cd api && uv run $(ENV_FILE) fastapi dev src/budget_buddy/main.py) & \
 	(cd app && npm run dev) & \
 	wait
 
 dev-api: ## Run just the API dev server (needs api/.env with GEMINI_API_KEY)
-	cd api && uv run fastapi dev src/budget_buddy/main.py
+	cd api && uv run $(ENV_FILE) fastapi dev src/budget_buddy/main.py
 
 dev-app: ## Run just the app dev server
 	cd app && npm run dev

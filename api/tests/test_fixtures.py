@@ -23,9 +23,14 @@ from budget_buddy.main import (
 SAMPLE_DATA = Path(__file__).parents[2] / "sample-data"
 
 
-def transaction(date: str, description: str, amount: float) -> Transaction:
+def transaction(
+    date: str, description: str, amount: float, **extra: object
+) -> Transaction:
     return Transaction(
-        date=datetime.date.fromisoformat(date), description=description, amount=amount
+        date=datetime.date.fromisoformat(date),
+        description=description,
+        amount=amount,
+        **extra,
     )
 
 
@@ -83,8 +88,22 @@ FIXTURES = {
             ),
         ),
         15,
-        transaction("2026-09-07", "Tesco", -31.62),
-        transaction("2026-08-25", "Spotify", -14.49),
+        transaction(
+            "2026-09-07",
+            "Tesco",
+            -31.62,
+            category="Groceries",
+            txn_type="Card payment",
+            currency="GBP",
+        ),
+        transaction(
+            "2026-08-25",
+            "Spotify",
+            -14.49,
+            category="Entertainment",
+            txn_type="Card payment",
+            currency="GBP",
+        ),
     ),
     "natwest.csv": (
         ColumnMapping(
@@ -99,11 +118,15 @@ FIXTURES = {
             ),
         ),
         36,
-        transaction("2026-08-28", "PUREGYM LTD", -28.99),
+        transaction(
+            "2026-08-28", "PUREGYM LTD", -28.99, balance=2443.86, txn_type="D/D"
+        ),
         transaction(
             "2026-07-30",
             "BRIGHTFORD LTD , SALARY , FP 30/07/26 0803 , REV735916042881350",
             3980.44,
+            balance=5023.31,
+            txn_type="BAC",
         ),
     ),
     "starling.csv": (
@@ -121,8 +144,24 @@ FIXTURES = {
             ),
         ),
         20,
-        transaction("2026-07-30", "Brightford Ltd", 3980.44),
-        transaction("2026-08-28", "Puregym Ltd", -28.99),
+        transaction(
+            "2026-07-30",
+            "Brightford Ltd",
+            3980.44,
+            balance=4786.63,
+            reference="SALARY",
+            category="INCOME",
+            txn_type="DIRECT CREDIT",
+        ),
+        transaction(
+            "2026-08-28",
+            "Puregym Ltd",
+            -28.99,
+            balance=2504.19,
+            reference="PUREGYM LTD",
+            category="GENERAL",
+            txn_type="DIRECT DEBIT",
+        ),
     ),
 }
 
@@ -158,6 +197,20 @@ def test_sample_csv_parses_with_its_expected_mapping(name: str):
     assert len(rows) == expected_rows
     assert rows[0] == first
     assert rows[-1] == last
+
+
+def test_optional_fields_stay_none_when_the_file_has_no_such_exact_column():
+    """Amex carries only date, amount and an embedded payee, so nothing else fills."""
+    mapping, _, _, _ = FIXTURES["amex.csv"]
+    text, _ = decode_csv((SAMPLE_DATA / "amex.csv").read_bytes())
+
+    rows = parse_transactions(text, mapping)
+
+    assert all(
+        (row.balance, row.category, row.reference, row.txn_type, row.currency)
+        == (None, None, None, None, None)
+        for row in rows
+    )
 
 
 @pytest.mark.parametrize("name", FIXTURES)

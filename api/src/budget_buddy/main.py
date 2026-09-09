@@ -30,6 +30,13 @@ class Transaction(BaseModel):
     date: datetime.date
     description: str
     amount: float
+    # Filled from layer-A `exact` columns, or (reference / txn_type) from a layer-B
+    # slot. Optional because every fact is bank-specific: Amex ships none of them.
+    balance: float | None = None
+    category: str | None = None
+    reference: str | None = None
+    txn_type: str | None = None
+    currency: str | None = None
 
 
 # The file's header row is measured, not inferred, so which of the two addressing
@@ -161,6 +168,12 @@ class ColumnMapping(InferredMapping, Dialect):
 # The facts layer B can lift out of an embedded descriptor column. A subset of the
 # layer-A fact list: an amount or a balance never hides inside a payee descriptor.
 EMBEDDED_FACTS = ("payee", "date", "reference", "txn_type")
+
+# Optional facts surfaced on `Transaction` when layer A marks their column `exact`.
+# `balance` is numeric; the rest are pass-through bank labels coerced to str, so a
+# numeric-looking category column cannot break row validation.
+OPTIONAL_EXACT_FACTS = ("balance", "category", "reference", "txn_type", "currency")
+OPTIONAL_STRING_FACTS = ("category", "reference", "txn_type", "currency")
 
 
 class SlotAssignment(BaseModel):
@@ -366,6 +379,18 @@ def parse_transactions(
     # passes through unchanged until layer B can split it into slots.
     description = required_column(fields.payee, "payee", has_header)
 
+    core = {date: "date", amount: "amount", description: "description"}
+    # Each layer-A `exact` optional fact, mapped to the pandas label of its column.
+    # A fact whose column is one of the core three is skipped: it is already read,
+    # and a duplicate in `usecols` would raise.
+    optional = {
+        column_label(source.column, has_header): fact
+        for fact in OPTIONAL_EXACT_FACTS
+        if (source := getattr(fields, fact)).purity == "exact"
+        and source.column is not None
+        and column_label(source.column, has_header) not in core
+    }
+
     df = pd.read_csv(
         io.StringIO(csv_text),
         header=0 if has_header else None,
@@ -374,14 +399,19 @@ def parse_transactions(
         parse_dates=[date],
         date_format=column_mapping.date_format,
         decimal=column_mapping.amount_separator,
-        usecols=[date, amount, description],
+        usecols=[*core, *optional],
     )
 
-    df = df.rename(columns={date: "date", amount: "amount", description: "description"})
+    df = df.rename(columns={**core, **optional})
     # Some exports right-pad descriptions to a fixed width; that padding is a
     # formatting artefact, not data, and would fragment shape() buckets later.
     df["description"] = df["description"].str.strip()
     df = df.where(pd.notna(df), None)
+    # Coerce the pass-through label columns to str so a numeric-looking category or
+    # reference (which pandas would type as float) still validates as `str | None`.
+    for fact in OPTIONAL_STRING_FACTS:
+        if fact in df.columns:
+            df[fact] = df[fact].map(lambda value: None if value is None else str(value))
     return [Transaction.model_validate(row) for row in df.to_dict(orient="records")]
 
 
@@ -486,23 +516,38 @@ def infer_slot_map(
     }
 
 
-def apply_payee_slots(
+# Layer-B slot facts mapped to the `Transaction` attribute each one fills. `payee`
+# narrows the description; `date` has no attribute (the date always comes from an
+# `exact` column) so it is inferred and validated but not applied.
+SLOT_FACT_ATTRS = {
+    "payee": "description",
+    "reference": "reference",
+    "txn_type": "txn_type",
+}
+
+
+def apply_slots(
     rows: list[Transaction],
     descriptions: list[str],
     slot_map: dict[str, SlotAssignment],
 ) -> None:
-    """Narrow each row's description to its payee slot, in place.
+    """Fill each row from its refined-shape slots, in place.
 
     `descriptions` is the list `slot_map` was inferred from, so re-bucketing it
-    here reproduces the same shapes and slot cuts. A bucket with no assignment or
-    no payee slot keeps the whole descriptor -- the pre-layer-B behaviour.
+    here reproduces the same shapes and slot cuts. A bucket with no assignment, or
+    an assignment whose slot for a fact is null, leaves that fact alone -- for the
+    payee that means the whole descriptor stays, the pre-layer-B behaviour.
     """
     for shape, members in refine_with_slots(descriptions).items():
         assignment = slot_map.get(shape)
-        if assignment is None or assignment.payee is None:
+        if assignment is None:
             continue
-        for index, row_slots in members:
-            rows[index].description = row_slots[assignment.payee].strip()
+        for fact, attr in SLOT_FACT_ATTRS.items():
+            slot = getattr(assignment, fact)
+            if slot is None:
+                continue
+            for index, row_slots in members:
+                setattr(rows[index], attr, row_slots[slot].strip())
 
 
 @app.post("/transactions")
@@ -523,6 +568,6 @@ def csv_to_transactions(file: UploadFile) -> list[Transaction]:
             embedded_facts_in(column_mapping.fields, payee.column),
             client,
         )
-        apply_payee_slots(rows, descriptions, slot_map)
+        apply_slots(rows, descriptions, slot_map)
 
     return rows

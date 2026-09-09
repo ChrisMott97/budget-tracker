@@ -76,6 +76,11 @@ def test_transactions_endpoint_returns_parsed_rows(fake_client):
         "date": "2025-03-01",
         "description": "TESCO STORES 1234",
         "amount": -1.0,
+        "balance": None,
+        "category": None,
+        "reference": None,
+        "txn_type": None,
+        "currency": None,
     }
 
 
@@ -161,6 +166,11 @@ def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
         "date": "2026-07-30",
         "description": "CR BRIGHTFORD LTD SALARY",
         "amount": 3980.44,
+        "balance": None,
+        "category": None,
+        "reference": None,
+        "txn_type": None,
+        "currency": None,
     }
 
 

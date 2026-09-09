@@ -15,7 +15,7 @@ from budget_buddy.main import (
     FieldSource,
     SlotAssignment,
     Transaction,
-    apply_payee_slots,
+    apply_slots,
     embedded_facts_in,
     infer_slot_map,
 )
@@ -49,7 +49,7 @@ def test_embedded_facts_in_lists_only_facts_embedded_in_that_column():
     assert embedded_facts_in(fields, "Description") == ["payee", "reference"]
 
 
-def test_apply_payee_slots_narrows_description_to_the_payee_slot():
+def test_apply_slots_narrows_description_to_the_payee_slot():
     descriptions = [
         "CR BRIGHTFORD LTD SALARY",
         "DD VODAFONE LTD",
@@ -57,7 +57,7 @@ def test_apply_payee_slots_narrows_description_to_the_payee_slot():
     ]
     rows = [txn(d) for d in descriptions]
 
-    apply_payee_slots(rows, descriptions, {"PFX W+": SlotAssignment(payee=1)})
+    apply_slots(rows, descriptions, {"PFX W+": SlotAssignment(payee=1)})
 
     assert [row.description for row in rows] == [
         "BRIGHTFORD LTD SALARY",
@@ -66,7 +66,7 @@ def test_apply_payee_slots_narrows_description_to_the_payee_slot():
     ]
 
 
-def test_apply_payee_slots_leaves_a_bucket_with_no_payee_assignment_untouched():
+def test_apply_slots_leaves_a_bucket_with_no_payee_assignment_untouched():
     descriptions = [
         "CR BRIGHTFORD LTD SALARY",
         "DD VODAFONE LTD",
@@ -74,9 +74,35 @@ def test_apply_payee_slots_leaves_a_bucket_with_no_payee_assignment_untouched():
     ]
     rows = [txn(d) for d in descriptions]
 
-    apply_payee_slots(rows, descriptions, {"PFX W+": SlotAssignment(payee=None)})
+    apply_slots(rows, descriptions, {"PFX W+": SlotAssignment(payee=None)})
 
     assert [row.description for row in rows] == descriptions
+
+
+def test_apply_slots_fills_txn_type_from_its_slot_alongside_the_payee():
+    descriptions = [
+        "CR BRIGHTFORD LTD SALARY",
+        "DD VODAFONE LTD",
+        "VIS BOKKA CAFE LISBOA",
+    ]
+    rows = [txn(d) for d in descriptions]
+
+    apply_slots(rows, descriptions, {"PFX W+": SlotAssignment(payee=1, txn_type=0)})
+
+    assert [(row.description, row.txn_type) for row in rows] == [
+        ("BRIGHTFORD LTD SALARY", "CR"),
+        ("VODAFONE LTD", "DD"),
+        ("BOKKA CAFE LISBOA", "VIS"),
+    ]
+
+
+def test_apply_slots_leaves_reference_and_txn_type_none_when_their_slots_are_null():
+    descriptions = ["CR BRIGHTFORD LTD SALARY", "DD VODAFONE LTD"]
+    rows = [txn(d) for d in descriptions]
+
+    apply_slots(rows, descriptions, {"PFX W+": SlotAssignment(payee=1)})
+
+    assert all(row.reference is None and row.txn_type is None for row in rows)
 
 
 def test_infer_slot_map_rejects_a_length_mismatch():

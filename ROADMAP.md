@@ -116,6 +116,20 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       function is now a thin wrapper over it. Pinned in `api/tests/test_layer_b.py`
       and `test_shapes.py`. Live model run against the fixtures still to do (eval,
       milestone 5).
+- [x] **Surface the parsed facts on the wire and in the table** 2026-09-09.
+      `Transaction` gained optional `balance`, `category`, `reference`, `txn_type`,
+      `currency`. `parse_transactions` fills them from any layer-A `exact` column
+      (one `read_csv`, columns de-duplicated against the core three); the string
+      facts are coerced with `str()` so a numeric-looking category cannot fail row
+      validation. `apply_payee_slots` became `apply_slots` and also writes the
+      `reference` / `txn_type` slots from layer B. The frontend table
+      (`components/TransactionsTable.tsx`, split out of `CsvImportPage` so it is
+      testable without the upload form) renders a column for an optional fact only
+      when some row carries it, and folds `currency` into the amount/balance cells.
+      Category is still the bank's raw label -- the set-to-set mapping below is
+      unchanged. Also fixed: the Vite dev proxy targeted `http://localhost:8000`,
+      which Node resolves to IPv6 `::1` first while `fastapi dev` binds IPv4 only,
+      so every `make dev` import failed at the proxy; it now targets `127.0.0.1`.
 - [ ] **Categorise by set-to-set mapping.** When `category.purity == "exact"`, do not
       categorise transactions at all: send the distinct category strings (Monzo 10,
       Starling 10) and map that set onto the preset list in one call. Transaction rows
