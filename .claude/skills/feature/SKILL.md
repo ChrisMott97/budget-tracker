@@ -18,7 +18,7 @@ $ARGUMENTS
 ## Procedure
 
 1. **Scope.** Read `ROADMAP.md` and find the matching item. If the feature is not a single diff reviewable in about ten minutes, propose a split and stop until the owner picks a slice.
-2. **Branch.** If on `main`, create `feat/<short-slug>` with `git switch -c`. If the working tree has unrelated changes, say so and stop.
+2. **Check the tree.** Work directly on `main`; do not create a branch. If the working tree already has unrelated uncommitted changes, say so and stop, so the owner's review diff stays to one feature.
 3. **Plan.** Enter plan mode. The plan lists: files to touch, tests to add (named by behaviour), any decision that needs the owner, and any dependency with a one-line justification. Wait for approval.
 4. **Implement.** Tests first for pure logic. Small steps. Keep the diff to the plan. If the plan turns out wrong, say so and re-plan rather than improvising.
 5. **Verify.** Run the full checks from `CLAUDE.md` for whichever side changed. The stop hook will run the test suites again. If a manual check in the browser is useful, do it and report what you saw.

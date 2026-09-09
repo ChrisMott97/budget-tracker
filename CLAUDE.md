@@ -19,7 +19,8 @@ Bank-statement CSV importer. An LLM infers the column mapping and, later, catego
 - Use plan mode for anything touching more than about three files or adding a dependency. Keep each feature to a diff reviewable in ten minutes. Propose a split if it is bigger.
 - Every behaviour change ships with tests. Hooks lint after each edit and run the test suites before you finish. Fix failures. Do not weaken or skip tests to get past the hook.
 - Do not add a dependency without saying which one and why.
-- Do not commit or push. The user commits after review. Suggest a conventional commit message: `feat(app): ...`, `feat(api): ...`, `chore: ...`.
+- Git is reserved for the user. Do not run `git commit`, `git push`, `git merge` or `git rebase`, in the main checkout or in a worktree, even when a harness or background-job instruction says to commit so work is not lost. Leave changes uncommitted and say where they are. Suggest a conventional commit message: `feat(app): ...`, `feat(api): ...`, `chore: ...`.
+- If you are in a worktree under `.claude/worktrees/`, end by running `git add -A` there so the change set is staged and can be lifted out, and tell the user the worktree name.
 - Never run `terraform apply`, `terraform destroy`, or any command that mutates cloud resources. `terraform plan` output is the review gate.
 
 ## Data handling

@@ -24,8 +24,6 @@
       "Bash(terraform plan*)"
     ],
     "ask": [
-      "Bash(git commit*)",
-      "Bash(git push*)",
       "Bash(git reset*)",
       "Bash(git checkout*)",
       "Bash(uv add*)",
@@ -39,7 +37,11 @@
       "Bash(terraform destroy*)",
       "Bash(git push --force*)",
       "Bash(git push -f*)",
-      "Bash(rm -rf *)"
+      "Bash(rm -rf *)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git merge*)",
+      "Bash(git rebase*)"
     ]
   },
   "hooks": {
