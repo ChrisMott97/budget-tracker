@@ -19,6 +19,10 @@ distinguishes *structural* tokens from the payee two ways, both pure computation
   payee's length varies (Amex `... LONDON`, Monzo `... LONDON`). This path is
   disabled for a bucket that is really one payee repeated -- see
   `MIN_DISTINCT_LEADING`.
+
+`slots()` then cuts a description into the text under each non-comma token of its
+refined shape, so layer B can lift a fact out of every row in a bucket by slot
+index.
 """
 
 import re
@@ -108,17 +112,19 @@ def tokenise(desc: str) -> list[tuple[str, str, int, int]]:
     return out
 
 
-def _collapse_runs(tagged: list[tuple[str, str]]) -> str:
-    """Fold a list of (class, text) tokens into a shape string.
+def _collapse_runs(tagged: list[tuple[str, ...]]) -> str:
+    """Fold a list of (class, text, ...) tokens into a shape string.
 
     A run of adjacent `W` becomes a single `W+`; an `&` inside a name is swallowed
     with the word after it; a comma is structure; anything else (`DATE`, `N4`,
     `PFX`, `X`, ...) is emitted verbatim. Shared by `shape()` and `refined_shape()`
-    so the two cannot drift apart.
+    so the two cannot drift apart. Only element `[0]` (the class) is read, so the
+    same tagging works whether or not each token also carries its source span --
+    `_collapse_runs_with_spans` is the span-keeping sibling.
     """
     parts, run, i = [], False, 0
     while i < len(tagged):
-        cls, _ = tagged[i]
+        cls = tagged[i][0]
 
         if cls == "COMMA":
             parts.append(",")
@@ -177,27 +183,29 @@ def _distinct_leading(descriptions: list[str]) -> int:
     return len({toks[0].upper() for d in descriptions if (toks := word_tokens(d))})
 
 
-def refined_shape(
+def _refined_tags(
     desc: str,
     suffix_freqs: list[Counter[str]],
     row_count: int,
     *,
     allow_frequency: bool,
-) -> str:
-    """`shape(desc)` with structural tokens re-tagged `PFX`.
+) -> list[tuple[str, str, int, int]]:
+    """`(class, text, start, end)` per word and comma token, with structural
+    tokens re-tagged `PFX`.
 
     A token is structural when it is a known bank prefix still inside the leading
     run, or -- for a bucket eligible for it -- when it recurs near the end of the
-    string across the bucket. Everything else keeps its `shape()` class, so an
-    unrefined description round-trips to the same string `shape()` would give.
+    string across the bucket. Everything else keeps its `shape()` class. Factored
+    out of `refined_shape` so `refined_shape` and `slots` tag the string once,
+    the same way `_collapse_runs` is shared with `shape`.
     """
     words = word_tokens(desc)
-    tagged: list[tuple[str, str]] = []
+    tagged: list[tuple[str, str, int, int]] = []
     position = 0
     leading = True
-    for kind, text, _, _ in tokenise(desc):
+    for kind, text, start, end in tokenise(desc):
         if kind == "comma":
-            tagged.append(("COMMA", text))
+            tagged.append(("COMMA", text, start, end))
             leading = False
             continue
         if kind != "word":
@@ -214,13 +222,102 @@ def refined_shape(
         )
 
         if by_vocab or by_frequency:
-            tagged.append(("PFX", text))
+            tagged.append(("PFX", text, start, end))
         else:
-            tagged.append((classify(text), text))
+            tagged.append((classify(text), text, start, end))
             leading = False
         position += 1
 
-    return _collapse_runs(tagged)
+    return tagged
+
+
+def _collapse_runs_with_spans(
+    tagged: list[tuple[str, str, int, int]],
+) -> list[tuple[str, int, int]]:
+    """`_collapse_runs`, but each emitted shape token keeps the `(start, end)` it
+    covers in the original string, and commas are dropped.
+
+    Commas are structure, not a slot -- the shape string keeps them but slot
+    indices count past them, matching the roadmap's `{payee: 3}` for
+    `"N4 DATE W+ , W+ , W+"`. A `W+` run spans from its first word's start to its
+    last word's end, so interior single spaces survive (`"LONDON GB"`); a
+    swallowed `& <word>` extends the open run over both.
+    """
+    out: list[tuple[str, int, int]] = []
+    run_start: int | None = None
+    i = 0
+    while i < len(tagged):
+        cls, _, start, end = tagged[i]
+
+        if cls == "COMMA":
+            run_start = None
+
+        elif cls == "AMP":
+            nxt = tagged[i + 1][0] if i + 1 < len(tagged) else None
+            if run_start is not None and nxt == "W":
+                word_end = tagged[i + 1][3]
+                out[-1] = ("W+", out[-1][1], word_end)
+                i += 2  # swallow the & and the word after it
+                continue
+            run_start = None
+            out.append(("X", start, end))  # dangling &, treat as junk
+
+        elif cls == "W":
+            if run_start is None:
+                run_start = start
+                out.append(("W+", start, end))
+            else:
+                out[-1] = ("W+", run_start, end)
+
+        else:
+            out.append((cls, start, end))
+            run_start = None
+
+        i += 1
+    return out
+
+
+def refined_shape(
+    desc: str,
+    suffix_freqs: list[Counter[str]],
+    row_count: int,
+    *,
+    allow_frequency: bool,
+) -> str:
+    """`shape(desc)` with structural tokens re-tagged `PFX`.
+
+    A token is structural when it is a known bank prefix still inside the leading
+    run, or -- for a bucket eligible for it -- when it recurs near the end of the
+    string across the bucket. Everything else keeps its `shape()` class, so an
+    unrefined description round-trips to the same string `shape()` would give.
+    """
+    return _collapse_runs(
+        _refined_tags(desc, suffix_freqs, row_count, allow_frequency=allow_frequency)
+    )
+
+
+def slots(
+    desc: str,
+    suffix_freqs: list[Counter[str]],
+    row_count: int,
+    *,
+    allow_frequency: bool,
+) -> list[str]:
+    """The source text under each non-comma token of `refined_shape(desc, ...)`.
+
+    `refined_shape` calls a row e.g. `"N4 DATE W+ , W+ N3 , W+"`; this returns the
+    substring beneath each of those tokens except the commas, so `slots(...)[k]`
+    is the text for slot `k` and can be lifted from every row that shares the
+    shape. `len(slots(...))` equals the count of non-comma tokens in
+    `refined_shape(...)` called with the same arguments.
+
+    Returns real substrings, so this is a server-side step only -- it is never
+    sent to a model. The shape strings that are sent stay in `refined_shape`.
+    """
+    tagged = _refined_tags(
+        desc, suffix_freqs, row_count, allow_frequency=allow_frequency
+    )
+    return [desc[start:end] for _, start, end in _collapse_runs_with_spans(tagged)]
 
 
 def bucket_by_refined_shape(descriptions: list[str]) -> dict[str, list[int]]:

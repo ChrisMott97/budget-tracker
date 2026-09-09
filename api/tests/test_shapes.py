@@ -11,7 +11,9 @@ from pathlib import Path
 from budget_buddy.profile import read_raw_frame
 from budget_buddy.shapes import (
     bucket_by_refined_shape,
+    refined_shape,
     shape,
+    slots,
     suffix_token_frequencies,
 )
 
@@ -130,6 +132,34 @@ def test_refined_shape_never_leaks_the_original_text():
             assert token not in key
 
 
+def _slots(desc: str, *, allow_frequency: bool = False) -> list[str]:
+    """`slots()` for one description in isolation, with its own suffix table."""
+    return slots(
+        desc, suffix_token_frequencies([desc]), 1, allow_frequency=allow_frequency
+    )
+
+
+def test_slot_text_is_the_payee_for_a_natwest_pos_row():
+    row = "7712 26AUG26 C , WAITROSE 742 , LONDON GB"
+
+    assert _slots(row)[3] == "WAITROSE"
+
+
+def test_a_word_run_slot_keeps_interior_spaces():
+    row = "7712 26AUG26 C , WAITROSE 742 , LONDON GB"
+
+    assert _slots(row)[5] == "LONDON GB"
+
+
+def test_a_bank_prefix_is_its_own_slot():
+    assert _slots("CR BRIGHTFORD LTD SALARY") == ["CR", "BRIGHTFORD LTD SALARY"]
+
+
+def test_an_ampersand_stays_inside_its_word_run_slot():
+    assert _slots("MARKS & SPENCER") == ["MARKS & SPENCER"]
+    assert _slots("M&S SIMPLY FOOD") == ["M&S SIMPLY FOOD"]
+
+
 def fixture_descriptions(
     name: str, label: str, *, has_header: bool = True
 ) -> list[str]:
@@ -156,3 +186,32 @@ def test_amex_bare_word_bucket_splits_the_trailing_location():
 
     assert len(buckets["W+ PFX"]) >= 5
     assert len(buckets.get("W+", [])) < 14
+
+
+def _refine_setup(descriptions: list[str]):
+    """(desc, suffix_freqs, row_count, allow_frequency) per description, grouped by
+    raw shape the way `bucket_by_refined_shape` sets its `refined_shape` calls up."""
+    groups: dict[str, list[str]] = {}
+    for desc in descriptions:
+        groups.setdefault(shape(desc), []).append(desc)
+    for group in groups.values():
+        freqs = suffix_token_frequencies(group)
+        for desc in group:
+            yield desc, freqs, len(group), True
+
+
+def test_slots_align_with_the_refined_shape_tokens():
+    """`len(slots(...))` always equals the non-comma token count of
+    `refined_shape(...)` for the same arguments, so the two folders cannot drift."""
+    fixtures = [
+        ("natwest.csv", "Description", True),
+        ("hsbc.csv", "1", False),
+        ("amex.csv", "Description", True),
+    ]
+    for name, label, has_header in fixtures:
+        descriptions = fixture_descriptions(name, label, has_header=has_header)
+        for desc, freqs, count, allow in _refine_setup(descriptions):
+            shape_str = refined_shape(desc, freqs, count, allow_frequency=allow)
+            non_comma = [tok for tok in shape_str.split() if tok != ","]
+            got = slots(desc, freqs, count, allow_frequency=allow)
+            assert len(got) == len(non_comma), (name, desc, shape_str, got)
