@@ -1,29 +1,32 @@
-import { useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import type { Transaction } from "../types";
 import { importCsv } from "../api/transactions";
 
-type ImportState =
-    | { status: "idle"; transactions: Transaction[] }
-    | { status: "loading"; transactions: Transaction[] }
-    | { status: "error"; error: string; transactions: Transaction[] }
+export type ImportStatus = "idle" | "loading" | "error" | "success";
 
 export function useCsvImport() {
-    const [state, setState] = useState<ImportState>({ status: "idle", transactions: [] });
+    const mutation = useMutation<Transaction[], Error, File>({
+        mutationFn: (file) => importCsv(file),
+    });
 
     async function run(file: File) {
-        setState({ status: "loading", transactions: [] });
         try {
-            const transactions = await importCsv(file);
-            setState({status: "idle", transactions});
-        } catch (error) {
-            setState({ status: "error", error: (error as Error).message, transactions: [] });
+            await mutation.mutateAsync(file);
+        } catch {
+            // mutateAsync rejects on failure, but the failure is already held in
+            // mutation.error and reported through `error` below. Swallowing the
+            // rejection keeps `run` safe to await from a submit handler.
         }
     }
 
+    // TanStack calls the in-flight state "pending"; the app's convention for
+    // async state is idle | loading | error, so only this name is adapted.
+    const status: ImportStatus = mutation.status === "pending" ? "loading" : mutation.status;
+
     return {
-        transactions: state.transactions,
-        status: state.status,
-        error: state.status === "error" ? state.error : undefined,
+        transactions: mutation.data ?? [],
+        status,
+        error: mutation.error?.message,
         run,
-    }
+    };
 }
