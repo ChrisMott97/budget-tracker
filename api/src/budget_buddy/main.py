@@ -2,12 +2,12 @@ import datetime
 import io
 import re
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, UploadFile
 from google import genai
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 app = FastAPI()
 
@@ -28,6 +28,95 @@ COLUMN_HINT = (
     'as a string, e.g. "0".'
 )
 
+Purity = Literal["exact", "embedded", "absent"]
+
+
+class FieldSource(BaseModel):
+    """Where one fact lives in the CSV, and whether that column holds only it.
+
+    The question is not "is this column the payee" but "does this column *contain*
+    the payee", which is the only form every bank can answer: Monzo keeps the payee
+    in a column of its own, NatWest buries it in a composite descriptor alongside a
+    location and a reference, and Amex ships no category at all.
+    """
+
+    column: str | None = Field(
+        None,
+        description=(
+            f"Column containing this fact. {COLUMN_HINT} "
+            "Null when the file does not carry the fact."
+        ),
+    )
+    purity: Purity = Field(
+        "absent",
+        description=(
+            "exact: the column holds this fact and nothing else, so its value can be "
+            "taken as-is. embedded: the fact is only one part of a larger composite "
+            "value in that column. absent: the file does not carry this fact."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def reconcile_column_and_purity(self) -> "FieldSource":
+        """Stop the two fields contradicting each other.
+
+        The model emits column and purity independently, so it can pair a real column
+        with `absent` or a confident purity with no column. Normalising both directions
+        here means callers may test either field alone, and a half-answer degrades into
+        a clean "absent" rather than a surprise further down.
+        """
+        if not self.column:
+            self.column = None
+            self.purity = "absent"
+        elif self.purity == "absent":
+            self.column = None
+        return self
+
+
+class FieldMap(BaseModel):
+    """The fixed fact list layer A answers, one FieldSource per fact.
+
+    Every fact defaults to absent, so a partial response from the model still
+    validates and fails later at the point of use, naming the fact that is missing.
+    """
+
+    date: FieldSource = Field(default_factory=FieldSource)
+    amount: FieldSource = Field(
+        default_factory=FieldSource,
+        description="The signed value of the transaction, not the running balance.",
+    )
+    balance: FieldSource = Field(
+        default_factory=FieldSource,
+        description="The running account balance after the transaction.",
+    )
+    payee: FieldSource = Field(
+        default_factory=FieldSource,
+        description=(
+            "The counterparty: the merchant, person or organisation paid or paid by."
+        ),
+    )
+    reference: FieldSource = Field(
+        default_factory=FieldSource,
+        description=(
+            "A payment reference, mandate or transaction id attached to the payment."
+        ),
+    )
+    category: FieldSource = Field(
+        default_factory=FieldSource,
+        description="A spending category assigned by the bank, not one you infer.",
+    )
+    txn_type: FieldSource = Field(
+        default_factory=FieldSource,
+        description=(
+            'Payment method or scheme, e.g. "Direct Debit", "POS", "Faster Payment".'
+        ),
+    )
+    currency: FieldSource = Field(default_factory=FieldSource)
+    notes: FieldSource = Field(
+        default_factory=FieldSource,
+        description="Free-text notes added by the customer.",
+    )
+
 
 class ColumnMapping(BaseModel):
     skip_rows: int = Field(
@@ -41,22 +130,16 @@ class ColumnMapping(BaseModel):
             "than transaction data."
         ),
     )
-    date_column: str = Field(
-        "date", description=f"Column containing transaction dates. {COLUMN_HINT}"
-    )
     date_format: str = Field(
         "%Y-%m-%d",
         description="Python strptime format string for parsing dates in the date column.",
     )
-    description_column: str = Field(
-        "description",
-        description=f"Column containing transaction descriptions. {COLUMN_HINT}",
-    )
-    amount_column: str = Field(
-        "amount", description=f"Column containing transaction amounts. {COLUMN_HINT}"
-    )
     amount_separator: Literal[".", ","] = Field(
         ".", description="Character used as the decimal separator in the amount column."
+    )
+    fields: FieldMap = Field(
+        default_factory=FieldMap,
+        description="Which column carries each fact, and how purely it carries it.",
     )
     confidence: float = Field(
         0.8, description="Confidence that the date format is correct."
@@ -72,16 +155,53 @@ def decode_csv(raw: bytes) -> tuple[str, str]:
     raise ValueError("Unable to decode CSV file with available encodings.")
 
 
+def _required_everywhere(node: Any) -> Any:
+    if isinstance(node, dict):
+        out = {key: _required_everywhere(value) for key, value in node.items()}
+        if isinstance(out.get("properties"), dict):
+            out["required"] = sorted(out["properties"])
+        return out
+    if isinstance(node, list):
+        return [_required_everywhere(item) for item in node]
+    return node
+
+
+def response_schema() -> dict[str, Any]:
+    """The mapping schema with every property marked required.
+
+    Pydantic omits `required` for any field carrying a default, so the generated
+    schema demands nothing -- and against the nested field map the model takes that
+    option, returning an empty object and leaving all nine facts absent. The defaults
+    exist so a *partial* answer degrades into `absent`, not so the question can be
+    skipped, so the schema the model is handed asks for every fact and both halves of
+    each one. `column` stays nullable, which turns "no such column" into something the
+    model must state rather than something it can omit.
+    """
+    return _required_everywhere(ColumnMapping.model_json_schema())
+
+
 def infer_column_mapping(csv_text: str, client: genai.Client) -> ColumnMapping:
     head = "\n".join(csv_text.splitlines()[:10])
-    prompt = "This is the start of a CSV file which contains bank transactions. Do not parse the transactions, determine the column mapping and return the mapping in JSON format. The first lines of the CSV file are:\n\n"
+    prompt = (
+        "This is the start of a CSV file of bank transactions. Do not parse or "
+        "return any transaction data. Describe where each fact lives, as JSON.\n\n"
+        "For every field, answer with the column that carries it and how purely "
+        "that column carries it:\n"
+        "- exact: the column holds that fact and nothing else.\n"
+        "- embedded: the fact is one part of a larger composite value, such as a "
+        "payee inside a descriptor that also carries a location and a reference.\n"
+        "- absent: the file does not carry the fact at all. Use a null column.\n\n"
+        "Two facts may name the same column when both are embedded in it. Prefer a "
+        "dedicated column over an embedded one when the file offers both.\n\n"
+        "The first lines of the CSV file are:\n\n"
+    )
     interaction = client.interactions.create(
         model="gemini-flash-lite-latest",
         input=prompt + head,
         response_format={
             "type": "text",
             "mime_type": "application/json",
-            "schema": ColumnMapping.model_json_schema(),
+            "schema": response_schema(),
         },
     )
 
@@ -108,13 +228,26 @@ def column_label(column: str, has_header: bool) -> str | int:
         ) from None
 
 
+def required_column(source: FieldSource, fact: str, has_header: bool) -> str | int:
+    """Resolve a fact the parser cannot do without into a pandas column label."""
+    if source.column is None:
+        raise HTTPException(
+            422, f"Column mapping found no column for the required field '{fact}'."
+        )
+    return column_label(source.column, has_header)
+
+
 def parse_transactions(
     csv_text: str, column_mapping: ColumnMapping
 ) -> list[Transaction]:
     has_header = column_mapping.has_header
-    date = column_label(column_mapping.date_column, has_header)
-    amount = column_label(column_mapping.amount_column, has_header)
-    description = column_label(column_mapping.description_column, has_header)
+    fields = column_mapping.fields
+    date = required_column(fields.date, "date", has_header)
+    amount = required_column(fields.amount, "amount", has_header)
+    # The payee column is the description source at either purity. When it is `exact`
+    # the value is already the whole answer; when it is `embedded` the full composite
+    # passes through unchanged until layer B can split it into slots.
+    description = required_column(fields.payee, "payee", has_header)
 
     df = pd.read_csv(
         io.StringIO(csv_text),

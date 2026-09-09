@@ -13,21 +13,36 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 
 ## 1. Parse and categorise  (current)
 - [x] Frontend stack decided 2026-09-09: stay on Vite + React as an SPA, add TanStack Query for server state. Next.js deferred to the second project. See the decisions log.
-- [ ] **Layer A -- field-presence map.** Replace the flat `*_column` fields on
-      `ColumnMapping` with a per-fact `FieldSource {column, purity}`, where purity is
-      `exact` / `embedded` / `absent`, over a fixed fact list: date, amount, balance,
-      payee, reference, category, txn_type, currency, notes. `exact` means take the
-      column as-is; `embedded` is the only thing that triggers layer B. The question
-      is no longer "is this column the payee" but "does this column *contain* the
-      payee", which is what the fixtures actually demand: Monzo's payee is
-      (`Name`, exact), NatWest's is (`Description`, embedded), Amex's category is
-      absent.
+- [x] **Layer A -- field-presence map** 2026-09-09. The flat `*_column` fields on
+      `ColumnMapping` are gone, replaced by a per-fact `FieldSource {column, purity}`
+      where purity is `exact` / `embedded` / `absent`, over a fixed fact list: date,
+      amount, balance, payee, reference, category, txn_type, currency, notes. `exact`
+      means take the column as-is; `embedded` is the only thing that will trigger
+      layer B. The question is no longer "is this column the payee" but "does this
+      column *contain* the payee", which is what the fixtures actually demand: Monzo's
+      payee is (`Name`, exact), NatWest's is (`Description`, embedded), Amex's category
+      is absent. Those answers are now pinned per fixture in
+      `api/tests/test_fixtures.py`, so the sample set doubles as the layer-A eval
+      target. `parse_transactions` takes its description from `payee` at either purity
+      -- an `embedded` value passes through whole until layer B can split it -- so no
+      fixture output changed. `FieldSource` reconciles column against purity in both
+      directions, which is where an incoherent model answer degrades into `absent`
+      instead of a corrupted mapping; a fact the parser requires that ends up absent is
+      a 422 naming the fact. `response_schema()` marks every property required on the
+      wire -- see the decisions log for why the nested schema needs that and the flat
+      one did not.
+- [ ] **Wire the column profiler into the layer-A prompt.** `profile.py` is still
+      unused by `main.py`. Feeding a profile to the model needs the file's `delimiter`,
+      `has_header` and `skip_rows` *before* the call, and today those come back *from*
+      that call, so this is blocked on detecting the dialect in code first
+      (`csv.Sniffer`, stdlib, no new dependency). Worth landing alongside the
+      milestone 3 narrowing below, since both rewrite the same prompt.
 - [x] **Column profiler** 2026-09-09, no model involved: per column, cardinality
       ratio, mean token count, mean length, case profile with its consistency
       fraction, fill rate, and cross-column token containment. Landed as
       `api/src/budget_buddy/profile.py` with `api/tests/test_profile.py` pinning the
-      measurements below against the fixtures. Not yet wired into `main.py` -- layer A
-      is its first consumer.
+      measurements below against the fixtures. Not yet wired into `main.py` -- see the
+      wiring item above.
       Cardinality separates enum columns (NatWest `Type` 0.17, Starling `Spending
       Category` 0.50) and constants (`Account Name` 0.03) from per-transaction data.
       Correction to the original note: it does *not* separate free text from a clean
@@ -114,6 +129,15 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       The headerless `hsbc.csv` row loss is fixed by `has_header` on `ColumnMapping`.
       Still to do: run real model inference against those expected mappings and
       score it, rather than only pinning the parser.
+      First live layer-A run, 2026-09-09, gemini-flash-lite against four fixtures, by
+      hand rather than in CI: every fact the parser needs was correct on all four, and
+      all three cases the layer-A design was built around came back right -- Monzo
+      payee (`Name`, exact), NatWest payee (`Description`, embedded), Amex category
+      absent. Two divergences from the pinned expectations, both harmless and both left
+      unchanged so the eval keeps reporting them: Starling `currency` came back as
+      (`Amount (GBP)`, embedded) when the currency is in the header label and not in the
+      values, and Monzo `reference` as (`Description`, exact) for what is really a raw
+      descriptor. Neither is wired into parsing yet.
 - [ ] Observability: structured logs and error alerting
 
 ## 6. Product
@@ -121,6 +145,20 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] Get five real users and record what changed as a result
 
 ## Decisions log
+- 2026-09-09: The schema handed to the model marks every property required, added after
+  the first live run of the nested field map came back with all nine facts `absent`.
+  Pydantic omits `required` for any field carrying a default, so the generated schema
+  demanded nothing and Gemini legitimately returned an empty object -- a flat schema of
+  scalars survived that, a nested one does not. The defaults stay in the Python model,
+  where their job is to degrade a *partial* answer into `absent`; `response_schema()`
+  re-imposes the requirement only on the wire, and `column` stays nullable so "this file
+  has no such column" is something the model states rather than omits.
+- 2026-09-09: Layer A ships its field map before the column profiler is wired into the
+  prompt, even though layer A was meant to be the profiler's first consumer. Profiling
+  a file requires its delimiter, header row and skip count, and those are part of what
+  the model currently infers, so consuming a profile means detecting the dialect in
+  code first. Splitting keeps the field-map diff reviewable and stops a mis-sniffed
+  delimiter and a wrong field map arriving as one indistinguishable failure.
 - 2026-09-09: Split column inference into two layers. Layer A asks which column
   *contains* a fact and whether it holds the whole value (`exact`) or part of one
   (`embedded`); layer B asks where inside a composite column the fact sits. These were

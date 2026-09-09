@@ -22,10 +22,16 @@ class FakeClient:
         return SimpleNamespace(output_text=self._outputs.pop(0))
 
 
+def exact(column: str) -> dict:
+    return {"column": column, "purity": "exact"}
+
+
 MAPPING = {
-    "date_column": "Date",
-    "description_column": "Description",
-    "amount_column": "Amount",
+    "fields": {
+        "date": exact("Date"),
+        "amount": exact("Amount"),
+        "payee": {"column": "Description", "purity": "embedded"},
+    }
 }
 
 
@@ -98,10 +104,12 @@ def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
         [
             {
                 "has_header": False,
-                "date_column": "0",
                 "date_format": "%d/%m/%Y",
-                "description_column": "1",
-                "amount_column": "2",
+                "fields": {
+                    "date": exact("0"),
+                    "amount": exact("2"),
+                    "payee": {"column": "1", "purity": "embedded"},
+                },
             }
         ]
     )
@@ -121,3 +129,14 @@ def test_transactions_endpoint_parses_a_headerless_csv(monkeypatch):
         "description": "CR BRIGHTFORD LTD SALARY",
         "amount": 3980.44,
     }
+
+
+def test_transactions_endpoint_rejects_a_field_map_missing_a_required_fact(monkeypatch):
+    """A model answer that names no amount column is a validation failure, not a crash."""
+    client = FakeClient([{"fields": {"date": exact("Date"), "payee": exact("Desc")}}])
+    monkeypatch.setattr(api, "get_client", lambda: client)
+
+    response = post_csv("Date,Desc,Amount\n2025-03-12,TESCO,-12.50\n")
+
+    assert response.status_code == 422
+    assert "amount" in response.json()["detail"]

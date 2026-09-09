@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from budget_buddy.main import ColumnMapping, Transaction, decode_csv, parse_transactions
+from budget_buddy.main import (
+    ColumnMapping,
+    FieldMap,
+    FieldSource,
+    Transaction,
+    decode_csv,
+    parse_transactions,
+)
 
 SAMPLE_DATA = Path(__file__).parents[2] / "sample-data"
 
@@ -21,13 +28,23 @@ def transaction(date: str, description: str, amount: float) -> Transaction:
     )
 
 
+def exact(column: str) -> FieldSource:
+    return FieldSource(column=column, purity="exact")
+
+
+def embedded(column: str) -> FieldSource:
+    return FieldSource(column=column, purity="embedded")
+
+
 FIXTURES = {
     "amex.csv": (
         ColumnMapping(
-            date_column="Date",
             date_format="%d/%m/%Y",
-            description_column="Description",
-            amount_column="Amount",
+            fields=FieldMap(
+                date=exact("Date"),
+                amount=exact("Amount"),
+                payee=embedded("Description"),
+            ),
         ),
         23,
         transaction("2026-09-07", "TESCO EXPRESS 3411 3411 LONDON", 31.62),
@@ -36,10 +53,16 @@ FIXTURES = {
     "hsbc.csv": (
         ColumnMapping(
             has_header=False,
-            date_column="0",
             date_format="%d/%m/%Y",
-            description_column="1",
-            amount_column="2",
+            fields=FieldMap(
+                date=exact("0"),
+                amount=exact("2"),
+                # Column 1 carries both facts, which is what `embedded` is for:
+                # "CR BRIGHTFORD LTD SALARY" is a type prefix, a payee and a reference.
+                payee=embedded("1"),
+                txn_type=embedded("1"),
+                reference=embedded("1"),
+            ),
         ),
         25,
         transaction("2026-07-30", "CR BRIGHTFORD LTD SALARY", 3980.44),
@@ -47,10 +70,16 @@ FIXTURES = {
     ),
     "monzo.csv": (
         ColumnMapping(
-            date_column="Date",
             date_format="%d/%m/%Y",
-            description_column="Name",
-            amount_column="Amount",
+            fields=FieldMap(
+                date=exact("Date"),
+                amount=exact("Amount"),
+                payee=exact("Name"),
+                category=exact("Category"),
+                txn_type=exact("Type"),
+                currency=exact("Currency"),
+                notes=exact("Notes and #tags"),
+            ),
         ),
         15,
         transaction("2026-09-07", "Tesco", -31.62),
@@ -58,10 +87,15 @@ FIXTURES = {
     ),
     "natwest.csv": (
         ColumnMapping(
-            date_column="Date",
             date_format="%d %b %Y",
-            description_column="Description",
-            amount_column="Value",
+            fields=FieldMap(
+                date=exact("Date"),
+                amount=exact("Value"),
+                balance=exact("Balance"),
+                txn_type=exact("Type"),
+                payee=embedded("Description"),
+                reference=embedded("Description"),
+            ),
         ),
         36,
         transaction("2026-08-28", "PUREGYM LTD", -28.99),
@@ -73,16 +107,44 @@ FIXTURES = {
     ),
     "starling.csv": (
         ColumnMapping(
-            date_column="Date",
             date_format="%d/%m/%Y",
-            description_column="Counter Party",
-            amount_column="Amount (GBP)",
+            fields=FieldMap(
+                date=exact("Date"),
+                amount=exact("Amount (GBP)"),
+                balance=exact("Balance (GBP)"),
+                payee=exact("Counter Party"),
+                reference=exact("Reference"),
+                category=exact("Spending Category"),
+                txn_type=exact("Type"),
+                notes=exact("Notes"),
+            ),
         ),
         20,
         transaction("2026-07-30", "Brightford Ltd", 3980.44),
         transaction("2026-08-28", "Puregym Ltd", -28.99),
     ),
 }
+
+# The layer-A answers worth stating outright, because they are the cases that made a
+# flat "which column is the payee" unanswerable. Kept separate from FIXTURES so the
+# facts the parser never reads are asserted rather than merely present.
+EXPECTED_FIELD_SOURCES = [
+    ("monzo.csv", "payee", "Name", "exact"),
+    ("natwest.csv", "payee", "Description", "embedded"),
+    ("amex.csv", "category", None, "absent"),
+    ("amex.csv", "balance", None, "absent"),
+    ("hsbc.csv", "txn_type", "1", "embedded"),
+    ("starling.csv", "category", "Spending Category", "exact"),
+]
+
+
+@pytest.mark.parametrize("name,fact,column,purity", EXPECTED_FIELD_SOURCES)
+def test_expected_field_map_answers_the_facts_layer_a_exists_for(
+    name: str, fact: str, column: str | None, purity: str
+):
+    source = getattr(FIXTURES[name][0].fields, fact)
+
+    assert (source.column, source.purity) == (column, purity)
 
 
 @pytest.mark.parametrize("name", FIXTURES)
