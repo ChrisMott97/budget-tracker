@@ -40,7 +40,11 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 
 ## 5. Quality and evals
 - [ ] Playwright end-to-end test for the CSV upload flow
-- [ ] Eval set: sample CSVs from several banks with expected column mappings, run in CI
+- [~] Eval set: sample CSVs from several banks with expected column mappings, run in CI.
+      Synthetic fixtures for NatWest, Amex, Monzo, Starling and HSBC live in
+      `sample-data/` (added 2026-09-09). Expected mappings and the CI runner are
+      still to do. `hsbc.csv` is headerless and currently loses its first row
+      silently -- see `sample-data/README.md`.
 - [ ] Observability: structured logs and error alerting
 
 ## 6. Product

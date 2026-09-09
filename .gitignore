@@ -12,3 +12,6 @@
 .claude/settings.local.json
 .claude/worktrees/
 CLAUDE.local.md
+
+# Real bank statements. Never commit. Use sample-data/ for testing.
+real-data/
