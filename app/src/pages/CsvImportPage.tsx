@@ -35,6 +35,7 @@ export default function CsvImportPage() {
                     {status === "loading" ? "Importing..." : "Import CSV"}
                 </button>
             </form>
+            {error && <p role="alert" className="text-red-600">{error}</p>}
             <table className="table-fixed w-2/3 mt-4">
                 <thead>
                     <tr className="text-left">
