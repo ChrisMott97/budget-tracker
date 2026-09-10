@@ -116,6 +116,27 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       function is now a thin wrapper over it. Pinned in `api/tests/test_layer_b.py`
       and `test_shapes.py`. Live model run against the fixtures still to do (eval,
       milestone 5).
+- [x] **Layer B -- slot profile** 2026-09-09, found by running `natwest.csv`
+      through the UI: every card row's description came back as `C`. Not a
+      hallucination -- the model was asked an unanswerable question. A shape calls
+      both the `C` of `7712 26AUG26 C , WAITROSE 742 , LONDON GB` and the merchant
+      beside it `W+`, and `mask_words` blanks both to `X`, so the model picked the
+      first word run after the date on all six card shapes, and those rows then
+      reached payee categorisation as `C` and came back uncategorised.
+      `shapes.profile_slots` now measures each slot across its bucket -- distinct
+      values, mean word count, mean length, mean digit fraction -- and
+      `infer_slot_map` sends that with the shape. Counts and means only, no slot
+      text, so the layer-B masking guarantee is unchanged. `digits` earns its place
+      separately: the mask blanks `ALEX HOLLOWAY` and `REV735916042881466` alike,
+      and only the digit fraction tells a payee from a reference. Live against the
+      fixtures: NatWest 10/10 buckets correct (was 6/10 wrong), HSBC 24/25 rows
+      categorised, Amex 23/23.
+      Fixed alongside it, a bug the same run exposed: `refine_with_slots` keyed a
+      one-row group on the raw `shape()` while cutting it with the refined tagging,
+      so a `PFX` slot the key did not name shifted every index past it --
+      `VIS WAITROSE 742 LONDON` keyed as `W+ N3 W+`, slot 0 = `VIS`. A lone row now
+      keys on `refined_shape` too; only the frequency rule needs a bucket, the head
+      vocabulary does not.
 - [x] **Surface the parsed facts on the wire and in the table** 2026-09-09.
       `Transaction` gained optional `balance`, `category`, `reference`, `txn_type`,
       `currency`. `parse_transactions` fills them from any layer-A `exact` column
@@ -248,6 +269,19 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] Get five real users and record what changed as a result
 
 ## Decisions log
+- 2026-09-09: Layer B sends per-slot *measurements* alongside the shape, and the
+  prompt ranks candidates by ruling structural slots out rather than by picking the
+  most variable one. The first fix attempt told the model to prefer the slot with
+  the most distinct values; that got every card row right and broke both transfer
+  buckets, choosing the opaque `OBAM6BZC3X8KTNP19` over `ALEX HOLLOWAY` and the
+  narrative `EXPENSES` over `BRIGHTFORD LTD`. Variability is evidence that a slot is
+  *not* a constant flag, not evidence that it is the payee. So the rule became: rule
+  out a one- or two-character slot that never changes, rule out a high-digit or very
+  long single token, then take the earliest name-like word run -- the counterparty
+  leads a bank descriptor and a run after it is usually a location or a narrative.
+  That ordering is correct on all ten NatWest buckets, and it leaves the genuinely
+  ambiguous ones ambiguous: `ALEX HOLLOWAY , ... , TPP REVOLUT BANK U` answers 0 or 2
+  between runs, both defensible for a transfer to one's own Revolut.
 - 2026-09-09: Layer B sends the model word-masked sample rows alongside the refined
   shape strings, not the bare shapes and not real values. Bare shapes are one string
   per bucket, so an anchor-less bucket like `W+ , W+ , W+` gives the model nothing to

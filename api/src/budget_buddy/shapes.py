@@ -27,6 +27,7 @@ index.
 
 import re
 from collections import Counter
+from statistics import fmean
 
 # The word/comma/space tokeniser. `profile.py` imports `word_tokens` from here
 # rather than re-deriving the word alternative, now that main -> shapes and
@@ -330,6 +331,46 @@ def non_comma_slot_count(refined: str) -> int:
     return len([tok for tok in refined.split() if tok != ","])
 
 
+def _digit_fraction(value: str) -> float:
+    """Share of `value`'s non-space characters that are digits, 0.0 for an empty one."""
+    chars = [c for c in value if not c.isspace()]
+    return sum(c.isdigit() for c in chars) / len(chars) if chars else 0.0
+
+
+def profile_slots(bucket_slots: list[list[str]]) -> list[dict[str, float]]:
+    """Per-slot measurements across one refined-shape bucket.
+
+    A refined shape calls both the `C` of `7712 26AUG26 C , WAITROSE 742 , ...`
+    and the merchant beside it `W+`, and `mask_words` blanks both to `X`, so the
+    shape and the masked samples together cannot say which run is the payee. These
+    measurements can: the payee varies per row and runs long, while a card
+    indicator or scheme code takes the same one-character value on every row.
+
+    Per slot: how many distinct values it takes over the bucket, the mean word
+    count and character length of those values, and the mean fraction of their
+    characters that are digits. `digits` separates a payee from a reference, which
+    `mask_words` cannot -- it blanks `ALEX HOLLOWAY` and `REV735916042881466` to
+    the same `X`. Counts and means only -- no slot text -- so this is safe to send
+    where `slots()` output is not.
+
+    Every row in a bucket shares a refined shape and therefore a slot count; the
+    width guard only keeps a short row from raising.
+    """
+    width = max((len(row) for row in bucket_slots), default=0)
+    profile: list[dict[str, float]] = []
+    for index in range(width):
+        values = [row[index].strip() for row in bucket_slots if index < len(row)]
+        profile.append(
+            {
+                "distinct": len({value.upper() for value in values}),
+                "words": round(fmean(len(word_tokens(v)) for v in values), 1),
+                "chars": round(fmean(len(v) for v in values), 1),
+                "digits": round(fmean(_digit_fraction(v) for v in values), 2),
+            }
+        )
+    return profile
+
+
 def mask_words(desc: str) -> str:
     """`desc` with every word token replaced by `"X"`, other tokens kept literal.
 
@@ -367,16 +408,17 @@ def refine_with_slots(
 
     refined: dict[str, list[tuple[int, list[str]]]] = {}
     for members in raw_groups.values():
-        if len(members) == 1:
-            index = members[0]
-            desc = descriptions[index]
-            freqs = suffix_token_frequencies([desc])
-            row_slots = slots(desc, freqs, 1, allow_frequency=False)
-            refined.setdefault(shape(desc), []).append((index, row_slots))
-            continue
         group = [descriptions[i] for i in members]
         suffix_freqs = suffix_token_frequencies(group)
-        allow_frequency = _distinct_leading(group) >= MIN_DISTINCT_LEADING
+        # The trailing-token rule needs a bucket to measure against, so a lone row
+        # is refined by the head vocabulary only. Its key still comes from
+        # `refined_shape`, not `shape`: keying a one-row group on the raw shape
+        # while cutting it with `_refined_tags` put a `PFX` slot in `row_slots`
+        # that the key did not name, so every index past it addressed the wrong
+        # text ("VIS WAITROSE 742 LONDON" keyed as "W+ N3 W+", slot 0 = "VIS").
+        allow_frequency = (
+            len(members) > 1 and _distinct_leading(group) >= MIN_DISTINCT_LEADING
+        )
         for index in members:
             key = refined_shape(
                 descriptions[index],

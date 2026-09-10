@@ -16,7 +16,12 @@ from budget_buddy.profile import (
     read_raw_frame,
     sample_column_values,
 )
-from budget_buddy.shapes import mask_words, non_comma_slot_count, refine_with_slots
+from budget_buddy.shapes import (
+    mask_words,
+    non_comma_slot_count,
+    profile_slots,
+    refine_with_slots,
+)
 
 app = FastAPI()
 
@@ -457,8 +462,13 @@ def infer_slot_map(
     """Ask the model which slot index holds each embedded fact, per refined shape.
 
     Cost is O(distinct shapes): NatWest is ~10 shapes for 36 rows. The model sees
-    only the shape strings and word-masked sample rows, never a raw description, so
-    it cannot return a payee -- only an index into one.
+    the shape strings, `profile_slots` measurements and word-masked sample rows,
+    never a raw description, so it cannot return a payee -- only an index into one.
+
+    The measurements are what make the question answerable: a shape calls both the
+    `C` of `7712 26AUG26 C , WAITROSE 742 , ...` and the merchant beside it `W+`,
+    and the mask blanks both to `X`, so shape and samples alone left the model
+    picking the first word run after the date -- `C` on every card row.
     """
     buckets = refine_with_slots(descriptions)
     shapes = list(buckets)
@@ -468,6 +478,16 @@ def infer_slot_map(
     payload = [
         {
             "shape": shape,
+            "rows": len(buckets[shape]),
+            "slots": [
+                {"index": index, "token": token, **stats}
+                for index, (token, stats) in enumerate(
+                    zip(
+                        [t for t in shape.split() if t != ","],
+                        profile_slots([row_slots for _, row_slots in buckets[shape]]),
+                    )
+                )
+            ],
             "samples": [
                 mask_words(descriptions[index]) for index, _ in buckets[shape][:3]
             ],
@@ -486,13 +506,31 @@ def infer_slot_map(
         "- X    punctuation or junk\n"
         "- ,    a comma: a separator, NOT a slot\n\n"
         "Number the slots left to right from 0, skipping commas, so "
-        '"N4 DATE W+ , W+ , W+" has slots 0=N4, 1=DATE, 2=W+, 3=W+, 4=W+.\n\n'
+        '"N4 DATE W+ , W+ , W+" has slots 0=N4, 1=DATE, 2=W+, 3=W+, 4=W+. Each '
+        "shape lists its slots with that index already attached.\n\n"
+        "Every row sharing a shape was measured, and each slot carries:\n"
+        "- distinct  how many different values the slot takes over the shape's "
+        "`rows` rows\n"
+        "- words     the mean number of words in it\n"
+        "- chars     the mean number of characters in it\n"
+        "- digits    the mean fraction of its characters that are digits\n\n"
         f"For each shape, give the slot index of each of these facts: "
         f"{', '.join(embedded_facts)}. Use null when the shape does not carry the "
-        "fact. The payee is the merchant, person or organisation; it is usually "
-        "the longest word run. A short word run beside it is often a location and "
-        "is not the payee. In the masked samples every word is X, but the numbers "
-        "and dates are real and mark where the structural slots sit.\n\n"
+        "fact.\n\n"
+        "The payee is the merchant, person or organisation. Find it by ruling "
+        "slots out first:\n"
+        "- a slot of one or two characters holding the same value on every row "
+        "(distinct 1) is a flag or a country code, never a payee\n"
+        "- a slot with a high digits fraction, or a single word tens of "
+        "characters long, is a reference or an account code, never a payee\n"
+        "- DATE, N and X slots are never the payee\n"
+        "Of the word runs left, the payee is the most name-like: several words, "
+        "few or no digits. When two of them qualify, take the earlier one -- the "
+        "counterparty leads a bank descriptor, and a run after it is usually a "
+        "location, a branch or a narrative. Only if every slot in the shape holds "
+        "the same value on every row, ignore distinct and go on length alone.\n\n"
+        "In the masked samples every word is X, but the numbers and dates are "
+        "real and mark where the structural slots sit.\n\n"
         "Return one assignment per shape, in the order given. The shapes are:\n\n"
     )
     interaction = client.interactions.create(

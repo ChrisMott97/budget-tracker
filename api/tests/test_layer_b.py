@@ -150,3 +150,33 @@ def test_infer_slot_map_prompt_carries_shapes_and_masked_samples_only():
     assert '"X X X X"' in prompt  # CR BRIGHTFORD LTD SALARY, every word masked
     for token in ["BRIGHTFORD", "VODAFONE", "BOKKA", "LISBOA", "SALARY"]:
         assert token not in prompt
+
+
+def test_infer_slot_map_prompt_carries_the_slot_profile_and_no_slot_text():
+    """The stats are what make the question answerable -- `C` and the merchant
+    beside it are both `W+` in the shape and both `X` in the mask -- so they have
+    to reach the model, and they have to reach it as numbers only."""
+    client = StubModel({"assignments": [{"payee": 3}]})
+    descriptions = [
+        "7712 26AUG26 C , WAITROSE , LONDON GB",
+        "7712 24AUG26 C , THE GOOD PLAICE , LONDON GB",
+        "7712 23AUG26 C , PRET A MANGER , LONDON GB",
+    ]
+
+    infer_slot_map(descriptions, ["payee"], client)
+    payload = json.loads(client.inputs[0].split("The shapes are:", 1)[1])
+
+    assert [entry["shape"] for entry in payload] == ["N4 DATE W+ , W+ , W+"]
+    assert payload[0]["rows"] == 3
+    flag, payee = payload[0]["slots"][2], payload[0]["slots"][3]
+    assert flag == {
+        "index": 2,
+        "token": "W+",
+        "distinct": 1,
+        "words": 1.0,
+        "chars": 1.0,
+        "digits": 0.0,
+    }
+    assert payee["distinct"] == 3
+    for token in ["WAITROSE", "PLAICE", "PRET", "LONDON"]:
+        assert token not in client.inputs[0]

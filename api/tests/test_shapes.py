@@ -13,6 +13,7 @@ from budget_buddy.shapes import (
     bucket_by_refined_shape,
     mask_words,
     non_comma_slot_count,
+    profile_slots,
     refine_with_slots,
     refined_shape,
     shape,
@@ -117,10 +118,27 @@ def test_a_recurring_leading_token_is_not_promoted_without_the_vocab():
     assert buckets["W+ PFX"] == [0, 1, 2]
 
 
-def test_bucket_by_refined_shape_leaves_a_singleton_untouched():
+def test_bucket_by_refined_shape_splits_a_singleton_on_the_vocabulary():
+    """A lone row has no bucket to measure frequency against, but the head
+    vocabulary needs none: `CR` is structural on its own evidence."""
     buckets = bucket_by_refined_shape(["CR BRIGHTFORD LTD SALARY"])
 
-    assert buckets == {"W+": [0]}
+    assert buckets == {"PFX W+": [0]}
+
+
+def test_refine_with_slots_keys_a_singleton_by_the_shape_it_was_cut_with():
+    """The key names the slots, so its slot count has to equal the cut's.
+
+    A one-row group keyed on the raw `shape()` while cut with the refined tagging
+    put an unnamed `PFX` slot at the front: "W+ N3 W+" claimed three slots over a
+    four-slot cut, so slot 0 addressed "VIS" instead of the payee.
+    """
+    refined = refine_with_slots(["VIS WAITROSE 742 LONDON"])
+
+    (key, [(_, row_slots)]) = next(iter(refined.items()))
+    assert key == "PFX W+ N3 W+"
+    assert row_slots == ["VIS", "WAITROSE", "742", "LONDON"]
+    assert len(row_slots) == non_comma_slot_count(key)
 
 
 def test_refined_shape_never_leaks_the_original_text():
@@ -266,3 +284,45 @@ def test_slots_align_with_the_refined_shape_tokens():
             non_comma = [tok for tok in shape_str.split() if tok != ","]
             got = slots(desc, freqs, count, allow_frequency=allow)
             assert len(got) == len(non_comma), (name, desc, shape_str, got)
+
+
+def test_profile_slots_separates_a_constant_flag_from_the_payee():
+    """The measurement layer B was missing: shape and mask call NatWest's `C` and
+    the merchant beside it the same thing, but their statistics differ."""
+    bucket = refine_with_slots(
+        [
+            "7712 26AUG26 C , WAITROSE , LONDON GB",
+            "7712 24AUG26 C , THE GOOD PLAICE , LONDON GB",
+            "7712 23AUG26 C , PRET A MANGER , LONDON GB",
+        ]
+    )
+    ((_, rows),) = bucket.items()
+
+    profile = profile_slots([row_slots for _, row_slots in rows])
+
+    assert profile[2] == {"distinct": 1, "words": 1.0, "chars": 1.0, "digits": 0.0}
+    assert profile[3]["distinct"] == 3
+    assert profile[3]["words"] > profile[2]["words"]
+
+
+def test_profile_slots_scores_a_reference_by_its_digits():
+    """`mask_words` blanks a name and a reference alike, so `digits` is the only
+    thing that tells them apart."""
+    profile = profile_slots(
+        [
+            ["ALEX HOLLOWAY", "REV735916042881466"],
+            ["J R WHITTAKER", "REV208473691155724"],
+        ]
+    )
+
+    assert profile[0]["digits"] == 0.0
+    assert profile[1]["digits"] > 0.8
+
+
+def test_profile_slots_reports_counts_and_means_only():
+    """It travels to the model, so it must carry no slot text."""
+    profile = profile_slots([["WAITROSE", "LONDON GB"], ["BOOTS", "LONDON GB"]])
+
+    assert all(
+        isinstance(value, (int, float)) for slot in profile for value in slot.values()
+    )
