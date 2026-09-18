@@ -1,5 +1,5 @@
 # Budget Tracker
-A basic budget tracker being written without agentic code to learn React, Python and LLM integrations. 
+A basic budget tracker being written with agentic code to learn React, Python and LLM integrations. 
 
 ## Planned Iterations
 1. Process a bank transactions CSV to determine which columns are the useful data
